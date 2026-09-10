@@ -1,6 +1,6 @@
 # Shield Pi v10.24 — First Public Release
 
-Shield Pi v10.24 is the first public open-source snapshot of the Raspberry Pi 5 TV/media interface developed for remote-only use on a real 13-inch 720×576 4:3 CRT.
+Shield Pi v10.24 is the first public open-source snapshot of the Raspberry Pi 4 TV/media interface developed for remote-only use on a real 13-inch 720×576 4:3 CRT.
 
 ## Highlights
 
@@ -35,7 +35,7 @@ Shield Pi v10.24 is the first public open-source snapshot of the Raspberry Pi 5 
 
 ## Target environment
 
-- Raspberry Pi 5
+- Raspberry Pi 4
 - Raspberry Pi OS / Debian Trixie
 - labwc / Wayland
 - Python / GTK3
