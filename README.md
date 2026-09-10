@@ -1,6 +1,6 @@
 # Shield Pi
 
-Shield Pi is an experimental Raspberry Pi 5 project for a **fully remote-controlled TV/media interface designed around a real 13-inch 720×576 4:3 CRT**.
+Shield Pi is an experimental Raspberry Pi 4 project for a **fully remote-controlled TV/media interface designed around a real 13-inch 720×576 4:3 CRT**.
 
 The project combines a custom GTK3 launcher, application-aware NVIDIA Shield Remote input, dynamic management of installed applications, persistent labwc workspaces, a recent-application task manager, a Shield-style VLC frontend, FreeTube navigation helpers, and a custom TV-oriented NordVPN control interface.
 
