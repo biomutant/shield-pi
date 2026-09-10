@@ -62,7 +62,7 @@ Core navigation is designed to work without a mouse:
 | Context | Main behavior |
 | --- | --- |
 | Launcher | D-pad selects; OK opens or activates |
-| Kodi | Physical remote keys pass through for Kodi's native TV navigation |
+| Kodi | Physical keys pass through for native navigation; short OK selects and long OK opens Kodi's context menu |
 | Firefox / Chromium | D-pad traverses focus, OK activates, Back goes through browser history, Search opens the address bar and on-screen keyboard |
 | FreeTube | Application-specific spatial navigation and search integration |
 | VLC / Shield VLC | Dedicated player, menu, dialog and media controls |
