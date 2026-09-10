@@ -128,7 +128,7 @@ Service:
 Unless explicitly requested, do not modify:
 
 - Shield Launcher design/navigation
-- Kodi short/long OK behavior
+- Kodi short OK select / long OK context-menu behavior
 - Home one press → Launcher
 - rapid double Home → Task Manager
 - Shield Remote daemon
