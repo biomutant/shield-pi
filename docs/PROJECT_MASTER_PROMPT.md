@@ -90,7 +90,7 @@ without revisiting the underlying hypothesis.
 
 ## Hardware / platform
 
-- Raspberry Pi 5
+- Raspberry Pi 4
 - Raspberry Pi OS / Debian Trixie
 - labwc / Wayland
 - GTK3
