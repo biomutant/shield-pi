@@ -17,14 +17,33 @@ When continuing this work:
 - change only the Server Grid geometry unless the task explicitly expands the scope;
 - do not solve overlap by changing the established 164×102 card size.
 
+## Current launcher and navigation behavior
+
+The published launcher contains built-in entries for VLC, FreeTube, Kodi and NordVPN. It can discover additional graphical applications from system and user `.desktop` files through **Add application**. Firefox and Chromium therefore appear as addable applications when installed.
+
+Managed applications receive persistent labwc workspaces. Selecting a running application activates its existing window rather than launching a duplicate.
+
+The task manager tracks recent Shield Pi applications, displays up to four cards at once, uses screenshots when available and supports activating or closing a task. One Home press returns to the launcher; a rapid double Home opens the task manager.
+
+Remote behavior is selected from the active application:
+
+- Kodi receives the physical remote keys unchanged for native Kodi TV navigation.
+- Firefox/Chromium use focus traversal, Enter activation, browser Back and address-bar/on-screen-keyboard integration.
+- FreeTube and VLC use their dedicated application-specific navigation paths.
+
+See `LAUNCHER_NAVIGATION.md` for details.
+
 ## Stable / protected working areas
 
 Unless explicitly targeted, preserve:
 
-- Launcher visual design and navigation
+- Launcher visual design, installed-app management and navigation
+- persistent application workspaces and duplicate-instance prevention
+- recent-application task manager behavior
 - Shield Remote daemon behavior
-- Kodi short/long OK behavior
-- single Home → Launcher and rapid double Home → Task Manager
+- Kodi native key passthrough
+- Firefox/Chromium remote-navigation profile
+- single Home → Launcher and rapid double Home → Task manager
 - Shield VLC seek/DVD behavior
 - FreeTube remote navigation
 - NordVPN Home
@@ -34,7 +53,7 @@ Unless explicitly targeted, preserve:
 ## Repository component snapshots
 
 - `nordvpn/` — current v10.24 NordVPN source and project-owned UI assets
-- `launcher/` — current Shield Launcher snapshot
+- `launcher/` — current Shield Launcher, app-management and task-manager snapshot
 - `remote/` — current Shield Remote daemon, profiles and service material
 - `vlc/` — Shield VLC v20 DVD/shuttle snapshot
 - `freetube/` — FreeTube navigation integration
@@ -45,4 +64,4 @@ Project-approved visual references and CRT photographs remain in the private dev
 
 ## Public collaboration note
 
-The public candidate intentionally excludes personal CRT/home photos, duplicate release ZIP archives and unverified third-party flag assets from the current tree. See `PUBLIC_RELEASE_CHECKLIST.md` and the repository-level `THIRD_PARTY_NOTICES.md`.
+The public repository intentionally excludes personal CRT/home photos, duplicate release ZIP archives and unverified third-party flag assets from the current tree. See `PUBLIC_RELEASE_CHECKLIST.md` and the repository-level `THIRD_PARTY_NOTICES.md`.
