@@ -1,6 +1,6 @@
 # Contributing to Shield Pi
 
-Thanks for your interest in Shield Pi. The project targets a Raspberry Pi 5 connected to a 13-inch 720×576 4:3 CRT and is designed for full D-pad/remote operation.
+Thanks for your interest in Shield Pi. The project targets a Raspberry Pi 4 connected to a 13-inch 720×576 4:3 CRT and is designed for full D-pad/remote operation.
 
 ## Ground rules
 
