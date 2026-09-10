@@ -28,7 +28,7 @@
 
 The remote daemon selects a profile from the active window:
 
-- **Kodi:** physical remote keycodes are passed through unchanged, preserving Kodi's native TV navigation.
+- **Kodi:** physical remote keycodes are passed through unchanged, preserving Kodi's native TV navigation. Short OK selects the focused item; long OK opens Kodi's context menu.
 - **Firefox / Chromium / Chrome:** Down, Right and Menu advance focus with Tab; Up and Left move to the previous focus target with Shift+Tab; OK sends Enter; Back sends Alt+Left.
 - **FreeTube:** application-specific navigation uses the Chromium remote-debugging integration.
 - **VLC / Shield VLC:** dedicated player, menu, dialog and media mappings are used.
