@@ -27,7 +27,7 @@ The task manager tracks recent Shield Pi applications, displays up to four cards
 
 Remote behavior is selected from the active application:
 
-- Kodi receives the physical remote keys unchanged for native Kodi TV navigation.
+- Kodi receives the physical remote keys unchanged for native Kodi TV navigation; short OK selects and long OK opens Kodi's context menu.
 - Firefox/Chromium use focus traversal, Enter activation, browser Back and address-bar/on-screen-keyboard integration.
 - FreeTube and VLC use their dedicated application-specific navigation paths.
 
