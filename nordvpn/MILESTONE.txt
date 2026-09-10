@@ -1,0 +1,18 @@
+SHIELD NORDVPN MILESTONE v10.18
+
+Status: STABILE BASISVERSION
+
+Vom Benutzer als funktionierender Meilenstein bestaetigt.
+
+Enthalten und als stabil festgelegt:
+- Hauptmenue / Home im gewuenschten Shield-CRT-Design
+- Erste System-Ebene unveraendert und funktionierend
+- Zweite Ebene fuer VPN im freigegebenen Shield-Design
+- Zweite Ebene fuer DNS Secure im freigegebenen Shield-Design
+- Zweite Ebene fuer Status im freigegebenen Shield-Design
+- D-Pad / OK / Zurueck / SY Navigation
+- CRT-Geometrie fuer 720x576
+- NordVPN-Launcher-Bindung an $HOME/nordvpn-app.py
+
+Regel fuer kuenftige Aenderungen:
+Diese Version ist die Rueckfallbasis. Neue Aenderungen sollen darauf aufbauen und funktionierende Bereiche nicht unbeabsichtigt veraendern.

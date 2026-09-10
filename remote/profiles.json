@@ -1,0 +1,48 @@
+{
+  "double_home_ms": 380,
+  "freetube_debug_port": 9222,
+  "profiles": {
+    "launcher": {
+      "match": [
+        "shield-launcher-test.py",
+        "Shield Pi Launcher",
+        "Shield Pi"
+      ]
+    },
+    "freetube": {
+      "match": [
+        "freetube",
+        "io.freetubeapp.FreeTube"
+      ]
+    },
+    "shieldvlc": {
+      "match": [
+        "shield-vlc.py",
+        "Shield VLC TV",
+        "shield-vlc"
+      ]
+    },
+    "vlc": {
+      "match": [
+        "vlc",
+        "org.videolan.vlc"
+      ]
+    },
+    "kodi": {
+      "match": [
+        "kodi"
+      ]
+    },
+    "browser": {
+      "match": [
+        "firefox",
+        "chromium",
+        "chrome",
+        "google-chrome"
+      ]
+    },
+    "generic": {
+      "match": []
+    }
+  }
+}

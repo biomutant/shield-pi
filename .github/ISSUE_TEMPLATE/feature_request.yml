@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a focused improvement for Shield Pi
+title: "[FEATURE] "
+labels: []
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - NordVPN UI
+        - Launcher
+        - Remote daemon
+        - Shield VLC
+        - FreeTube navigation
+        - Kodi integration
+        - Installer
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What problem should this feature solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired user-visible behavior, especially D-pad/remote behavior if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: protected
+    attributes:
+      label: Existing behavior that must remain unchanged
+      description: List any stable areas that this change must not regress.
+  - type: textarea
+    id: crt
+    attributes:
+      label: CRT / 720×576 considerations
+      description: Explain any layout, readability, overscan, or focus implications.

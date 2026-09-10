@@ -1,0 +1,30 @@
+name: Shield Pi CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            nordvpn/nordvpn-app.py \
+            launcher/shield-launcher-test.py \
+            remote/shield-remote.py \
+            vlc/shield-vlc.py
+
+      - name: Shell syntax
+        run: |
+          bash -n nordvpn/install.sh
+          bash -n remote/restore-shield-remote.sh
+          bash -n vlc/update-shield-controls-v20.sh
+          bash -n freetube/restore-freetube-navigation.sh

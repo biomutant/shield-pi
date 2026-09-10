@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*~
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.ovpn
+wg*.conf
+credentials*.json
+secrets*.json
+auth*.json
+nordvpn-token*
+
+# Local runtime/cache data
+cache/
+.cache/
+logs/
+*.log
+*.pid
+
+# Local backups / temporary work
+backup/
+backups/
+*.bak
+*.tmp
+/tmp/
+private/
+local-reference/
+
+# Downloaded/generated runtime flag caches
+cityflags-cache/
+flags-cache/
+
+# Release archives belong in GitHub Releases, not source history
+milestones/releases/*.zip
+milestones/rollback/*.zip
+
+# Personal visual references and CRT photos stay in the private archive
+assets/crt-reference/
+assets/approved/
+
+# Keep public documentation and milestone notes tracked
+!docs/
+!milestones/

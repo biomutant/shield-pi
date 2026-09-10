@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible Shield Pi problem
+title: "[BUG] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Shield Pi. Do not include credentials, tokens, private network details, or private photos.
+  - type: input
+    id: version
+    attributes:
+      label: Shield Pi / component version
+      placeholder: "Example: NordVPN v10.24"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - NordVPN UI
+        - Launcher
+        - Remote daemon
+        - Shield VLC
+        - FreeTube navigation
+        - Kodi integration
+        - Installer
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs / CRT evidence
+      description: Paste sanitized logs or attach a privacy-safe screenshot/photo if relevant.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed passwords, tokens, private IP/network information, and other secrets.
+          required: true
+        - label: I tested this on the real target device or clearly stated when I did not.
+          required: true
