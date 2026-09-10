@@ -80,7 +80,7 @@ The active window determines which navigation profile the Shield Remote daemon u
 | Context | D-pad | OK | Back | Search / Menu |
 | --- | --- | --- | --- | --- |
 | Launcher | Move between launcher controls | Open or activate | Return/cancel where defined | Search opens the on-screen keyboard |
-| Kodi | Passed through unchanged for Kodi's native TV navigation | Native Kodi select | Native Kodi back | Native key handling |
+| Kodi | Passed through unchanged for Kodi's native TV navigation | Short OK selects; long OK opens Kodi's context menu | Native Kodi back | Native key handling |
 | Firefox / Chromium / Chrome | Down or Right: next focus; Up or Left: previous focus | Enter/activate | Browser history back | Search focuses the address bar and opens the on-screen keyboard; Menu advances focus |
 | FreeTube | Application-specific spatial navigation through the remote-debugging integration | Activate focused item | Application-aware back behavior | Search focuses FreeTube search and opens the on-screen keyboard |
 | VLC / Shield VLC | Dedicated player, menu, dialog and media navigation | Context-dependent selection/playback control | Context-dependent back/close | Dedicated VLC behavior |
