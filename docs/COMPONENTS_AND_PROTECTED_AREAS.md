@@ -14,6 +14,7 @@ Status:
 **v10.24 is the canonical confirmed milestone.**
 
 Protected unless explicitly targeted:
+
 - Home layout/behavior
 - first System page
 - VPN/DNS/Status second-level pages
@@ -31,12 +32,27 @@ Current Pi target:
 Status:
 working and protected unless the launcher itself is the requested scope.
 
+Protected behavior:
+
+- built-in VLC, FreeTube, Kodi and NordVPN entries
+- graphical `.desktop` discovery through **Add application**
+- removing a user-added tile without uninstalling the operating-system application
+- persistent per-application labwc workspaces
+- activation of an existing window instead of launching duplicate instances
+- recent-task state and thumbnail handling
+- single Home → Launcher
+- rapid double Home → Task manager
+- remote-only operation without requiring a mouse
+
+See `LAUNCHER_NAVIGATION.md` for the complete behavior.
+
 ## Shield Remote
 
 Repository source:
 `remote/`
 
 Current Pi targets:
+
 - `$HOME/shield-remote/shield-remote.py`
 - `$HOME/shield-remote/profiles.json`
 - `/etc/systemd/system/shield-remote.service`
@@ -45,10 +61,13 @@ Status:
 working. Avoid changes unless remote behavior itself is shown to be the root cause.
 
 Protected behavior:
+
 - single Home → Launcher
-- rapid double Home → Task Manager
-- established Kodi short/long OK behavior
+- rapid double Home → Task manager
+- Kodi physical-key passthrough for native Kodi TV navigation
+- Firefox/Chromium focus traversal, browser Back behavior and Search-to-address-bar OSK flow
 - established FreeTube/VLC mappings
+- application-profile selection from the active window
 
 ## Shield VLC
 
