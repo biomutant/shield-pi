@@ -14,7 +14,7 @@ The repository is still experimental, but installer, launcher and service paths 
 
 ## Target platform
 
-- Raspberry Pi 5
+- Raspberry Pi 4
 - Raspberry Pi OS / Debian Trixie
 - labwc / Wayland
 - GTK3 / Python
