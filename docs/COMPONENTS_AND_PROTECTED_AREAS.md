@@ -64,7 +64,7 @@ Protected behavior:
 
 - single Home → Launcher
 - rapid double Home → Task manager
-- Kodi physical-key passthrough for native Kodi TV navigation
+- Kodi physical-key passthrough for native Kodi TV navigation, including short-OK selection and the long-OK context menu
 - Firefox/Chromium focus traversal, browser Back behavior and Search-to-address-bar OSK flow
 - established FreeTube/VLC mappings
 - application-profile selection from the active window
