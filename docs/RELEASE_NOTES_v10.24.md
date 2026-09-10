@@ -11,7 +11,7 @@ Shield Pi v10.24 is the first public open-source snapshot of the Raspberry Pi 4 
 - recent-application task manager with a four-card carousel, active-state indicators and optional thumbnails
 - single Home → launcher; rapid double Home → task manager
 - application-aware NVIDIA Shield Remote profiles
-- native Kodi TV-navigation passthrough
+- native Kodi TV-navigation passthrough, including the long-OK context menu
 - Firefox/Chromium focus traversal, browser Back and address-bar/on-screen-keyboard integration
 - dedicated FreeTube remote-debugging navigation
 - Shield VLC TV frontend with media, DVD and shuttle controls
