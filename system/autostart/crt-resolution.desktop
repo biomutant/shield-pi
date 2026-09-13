@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=CRT Resolution
+Exec=sh -c 'sleep 2; xrandr --output HDMI-1 --mode 720x576 --rate 50.00'
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

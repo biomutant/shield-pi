@@ -1,0 +1,18 @@
+# Shield Pi projectM / MilkDrop configuration
+Texture Size = 512
+Mesh X = 96
+Mesh Y = 72
+FPS = 35
+Fullscreen = false
+Window Width = 190
+Window Height = 190
+
+Smooth Transition Duration = 3
+Preset Duration = 30
+Easter Egg Parameter = 1
+Hard Cut Sensitivity = 10
+Aspect Correction = true
+
+Preset Path = /usr/share/projectM/presets/presets_milkdrop
+Title Font = Vera.ttf
+Menu Font = VeraMono.ttf

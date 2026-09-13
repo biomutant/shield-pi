@@ -5,6 +5,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 USER_HOME="${SHIELD_HOME:-$HOME}"
 VLC_TARGET="$USER_HOME/shield-vlc.py"
 VLC_BACKUP_DIR="$USER_HOME/.config/shield-vlc/backups"
+VLC_DATA_DIR="$USER_HOME/.config/shield-vlc"
 
 echo "[1/5] Aktuelle Shield-VLC-Datei sichern"
 mkdir -p "$VLC_BACKUP_DIR"
@@ -15,6 +16,10 @@ echo "[2/5] Python pruefen"
 
 echo "[3/5] Shield VLC v20 installieren"
 install -m 0755 "$HERE/shield-vlc.py" "$VLC_TARGET"
+install -d -m 0755 "$VLC_DATA_DIR"
+if [ -d "$HERE/assets" ]; then
+  install -m 0644 "$HERE/assets/"*.png "$VLC_DATA_DIR/"
+fi
 
 echo "[4/5] Laufendes Shield VLC beenden"
 pkill -f "$VLC_TARGET" 2>/dev/null || true

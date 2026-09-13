@@ -1,0 +1,161 @@
+<?xml version="1.0"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+
+  <theme>
+    <name>PiXnoir</name>
+    <font place="ActiveWindow">
+      <name>PibotoLt</name>
+    </font>
+    <font place="InactiveWindow">
+      <name>PibotoLt</name>
+    </font>
+    <font place="MenuHeader">
+      <name>PibotoLt</name>
+    </font>
+    <font place="MenuItem">
+      <name>PibotoLt</name>
+    </font>
+  </theme>
+
+  <focus>
+    <followMouse>yes</followMouse>
+    <followMouseRequiresMovement>no</followMouseRequiresMovement>
+  </focus>
+
+    <desktops number="32" popupTime="0" />
+
+<keyboard>
+    <default />
+
+    <!-- Shield Kiosk: Mauszeiger ueber Labwcs native Aktion ausblenden -->
+    <keybind key="A-W-h">
+      <action name="HideCursor" />
+    </keybind>
+
+    <!-- Super-Taste: Raspberry-Pi-Menü -->
+    <keybind key="Super_L" onRelease="yes">
+      <action name="Execute">
+        <command>wfpanelctl smenu menu</command>
+      </action>
+    </keybind>
+
+    <!-- F12 / Netflix-Taste -->
+    <keybind key="F12">
+      <action name="Execute">
+        <command>env YDOTOOL_SOCKET=/tmp/.ydotool_socket /usr/bin/ydotool click 0xC0</command>
+      </action>
+    </keybind>
+
+    <!-- F11: VLC nach vorne holen -->
+    <keybind key="F11">
+      <action name="ForEach">
+        <query identifier="vlc"/>
+        <then>
+          <action name="Raise"/>
+          <action name="Focus"/>
+        </then>
+      </action>
+    </keybind>
+
+    <!-- F10: kleinen Shield-Kreis an TEST-Launcher senden -->
+    <keybind key="F10">
+      <action name="Execute">
+        <command>pkill -USR1 -f 'shield-launcher-test.py$'</command>
+      </action>
+    </keybind>
+
+  
+    <!-- Shield Launcher workspace control -->
+    <keybind key="F13">
+      <action name="GoToDesktop" to="1" wrap="no" />
+    </keybind>
+
+    <keybind key="F14">
+      <action name="GoToDesktop" to="right" wrap="no" />
+    </keybind>
+
+    <keybind key="F15">
+      <action name="GoToDesktop" to="left" wrap="no" />
+    </keybind>
+
+    <keybind key="F16">
+      <action name="SendToDesktop" to="right" follow="yes" wrap="no" />
+    </keybind>
+
+    <keybind key="F17">
+      <action name="SendToDesktop" to="left" follow="yes" wrap="no" />
+    </keybind>
+
+    <keybind key="F7">
+      <action name="GoToDesktop" to="left" wrap="no" />
+    </keybind>
+
+    <!-- TEMP Workspace Test -->
+    <keybind key="F8">
+      <action name="GoToDesktop" to="right" wrap="no" />
+    </keybind>
+
+    <keybind key="F9">
+      <action name="SendToDesktop" to="right" follow="yes" wrap="no" />
+    </keybind>
+
+  </keyboard>
+  <windowRules>
+    <!-- SHIELD-AUTO-WORKSPACES-BEGIN -->
+    <windowRule identifier="shield-launcher-test.py">
+      <action name="SendToDesktop" to="1" follow="yes" />
+    </windowRule>
+    <windowRule identifier="shield-vlc.py">
+      <action name="SendToDesktop" to="2" follow="yes" />
+    </windowRule>
+    <windowRule identifier="Shield VLC TV">
+      <action name="SendToDesktop" to="2" follow="yes" />
+    </windowRule>
+    <windowRule identifier="shield-vlc">
+      <action name="SendToDesktop" to="2" follow="yes" />
+    </windowRule>
+    <windowRule identifier="freetube">
+      <action name="SendToDesktop" to="8" follow="yes" />
+    </windowRule>
+    <windowRule identifier="FreeTube">
+      <action name="SendToDesktop" to="8" follow="yes" />
+    </windowRule>
+    <windowRule identifier="io.freetubeapp.FreeTube">
+      <action name="SendToDesktop" to="8" follow="yes" />
+    </windowRule>
+    <windowRule identifier="Kodi">
+      <action name="SendToDesktop" to="3" follow="yes" />
+    </windowRule>
+    <windowRule identifier="kodi">
+      <action name="SendToDesktop" to="3" follow="yes" />
+    </windowRule>
+    <windowRule identifier="shield-nordvpn">
+      <action name="SendToDesktop" to="4" follow="yes" />
+    </windowRule>
+    <windowRule identifier="Shield NordVPN">
+      <action name="SendToDesktop" to="4" follow="yes" />
+    </windowRule>
+    <windowRule identifier="nordvpn-app.py">
+      <action name="SendToDesktop" to="4" follow="yes" />
+    </windowRule>
+    <windowRule identifier="chromium">
+      <action name="SendToDesktop" to="5" follow="yes" />
+    </windowRule>
+    <windowRule identifier="chromium.desktop">
+      <action name="SendToDesktop" to="5" follow="yes" />
+    </windowRule>
+    <windowRule identifier="firefox-esr">
+      <action name="SendToDesktop" to="6" follow="yes" />
+    </windowRule>
+    <windowRule identifier="firefox-esr.desktop">
+      <action name="SendToDesktop" to="6" follow="yes" />
+    </windowRule>
+    <windowRule identifier="pcmanfm">
+      <action name="SendToDesktop" to="7" follow="yes" />
+    </windowRule>
+    <windowRule identifier="pcmanfm.desktop">
+      <action name="SendToDesktop" to="7" follow="yes" />
+    </windowRule>
+    <!-- SHIELD-AUTO-WORKSPACES-END -->
+</windowRules>
+</openbox_config>

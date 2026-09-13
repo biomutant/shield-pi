@@ -2,12 +2,13 @@
 import argparse
 import json
 import os
-import pwd
+import re
 import signal
 import socket
 import subprocess
 import sys
 import time
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -23,12 +24,31 @@ try:
 except ImportError:
     websocket = None
 
-CURRENT_USER = pwd.getpwuid(os.getuid()).pw_name
-DEFAULT_CONFIG = Path.home() / 'shield-remote' / 'profiles.json'
+try:
+    import dbus
+except ImportError:
+    dbus = None
+
+DEFAULT_CONFIG = Path(
+    os.environ.get(
+        'SHIELD_REMOTE_CONFIG',
+        str(Path.home() / 'shield-remote' / 'profiles.json'),
+    )
+)
 REMOTE_NAME = 'NVIDIA SHIELD Remote'
 LAUNCHER_PATTERN = 'shield-launcher-test.py'
-RUNTIME_DIR = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+RUNTIME_DIR = Path(
+    os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
+)
 CONTROL_SOCKET = RUNTIME_DIR / 'shield-launcher-control.sock'
+SHIELD_VLC_CONTROL_SOCKET = RUNTIME_DIR / 'shield-vlc-control.sock'
+REMOTE_CONTROL_SOCKET = RUNTIME_DIR / 'shield-remote-control.sock'
+
+# Raw key codes measured on this NVIDIA SHIELD Remote.  We keep these
+# explicit as a direct fallback so the transport buttons cannot be confused
+# with D-pad LEFT/RIGHT by any evdev/ecodes aliasing or profile layer.
+SHIELD_KEY_REWIND = 168
+SHIELD_KEY_FASTFORWARD = 208
 OSK_MARKER = RUNTIME_DIR / 'shield-osk-visible'
 
 PHYSICAL = {
@@ -41,6 +61,8 @@ PHYSICAL = {
     ecodes.KEY_HOMEPAGE: 'HOME',
     ecodes.KEY_MENU: 'MENU',
     ecodes.KEY_PLAYPAUSE: 'PLAYPAUSE',
+    ecodes.KEY_REWIND: 'REWIND',
+    ecodes.KEY_FASTFORWARD: 'FASTFORWARD',
     ecodes.KEY_VOLUMEUP: 'VOLUMEUP',
     ecodes.KEY_VOLUMEDOWN: 'VOLUMEDOWN',
     ecodes.KEY_SEARCH: 'SEARCH',
@@ -50,9 +72,10 @@ PHYSICAL = {
 OUTPUT_KEYS = sorted(set([
     ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_LEFT, ecodes.KEY_RIGHT,
     ecodes.KEY_ENTER, ecodes.KEY_ESC, ecodes.KEY_TAB, ecodes.KEY_SPACE, ecodes.KEY_BACKSPACE,
-    ecodes.KEY_PLAYPAUSE, ecodes.KEY_VOLUMEUP, ecodes.KEY_VOLUMEDOWN,
+    ecodes.KEY_PLAYPAUSE, ecodes.KEY_REWIND, ecodes.KEY_FASTFORWARD,
+    ecodes.KEY_VOLUMEUP, ecodes.KEY_VOLUMEDOWN,
     ecodes.KEY_LEFTSHIFT, ecodes.KEY_LEFTALT, ecodes.KEY_LEFTCTRL,
-    ecodes.KEY_L, ecodes.KEY_F, ecodes.KEY_F6, ecodes.KEY_F10,
+    ecodes.KEY_L, ecodes.KEY_C, ecodes.KEY_F, ecodes.KEY_F6, ecodes.KEY_F10,
     ecodes.KEY_SELECT, ecodes.KEY_BACK, ecodes.KEY_MENU,
     ecodes.KEY_SEARCH, ecodes.KEY_VIDEO,
 ]))
@@ -1207,6 +1230,29 @@ if (!window.__shieldNavV8) {
 '''
 
 
+# Shield Pi drives a PAL 720x576 CRT output.  FreeTube normally preserves the
+# source aspect ratio and letterboxes 16:9 material.  The requested TV mode is
+# an intentional full-frame stretch: no crop and no black bars.
+FT_ASPECT_4_3_INSTALL = r'''(() => {
+  const id = "shield-force-4x3";
+  let style = document.getElementById(id);
+  if (!style) {
+    style = document.createElement("style");
+    style.id = id;
+    (document.head || document.documentElement).appendChild(style);
+  }
+  style.textContent = "video{width:100% !important;height:100% !important;object-fit:fill !important;}";
+  const video = document.querySelector("video");
+  const box = video ? video.getBoundingClientRect() : null;
+  return {
+    installed: Boolean(document.getElementById(id)),
+    videos: document.querySelectorAll("video").length,
+    videoBox: box ? [Math.round(box.width), Math.round(box.height)] : null,
+    objectFit: video ? getComputedStyle(video).objectFit : null,
+  };
+})()'''
+
+
 class ShieldRemote:
     def __init__(self, config_path, no_grab=False, verbose=False):
         self.config_path = Path(config_path)
@@ -1222,9 +1268,33 @@ class ShieldRemote:
         self.vlc_menu_active = False
         self.vlc_ui_mode = False
         self.vlc_dialog_expected_until = 0.0
+
+        # Application-specific long-press handling.  We deliberately keep this
+        # in the single physical-remote daemon so Kodi and Shield VLC never
+        # receive duplicate short/long actions from the same OK/Netflix press.
+        self.kodi_select_down = None
+        self.kodi_select_long_sent = False
+        self.kodi_select_hold = 0.65
+        self.kodi_select_timer = None
+        self.kodi_select_token = 0
+        self.shieldvlc_select_down = None
+        self.shieldvlc_select_long_sent = False
+        self.shieldvlc_select_hold = 0.65
+        self.shieldvlc_select_timer = None
+        self.shieldvlc_select_token = 0
+
         self._cdp = None
         self._cdp_id = 0
         self._cdp_last_error = 0.0
+        self.cdp_lock = threading.RLock()
+        self.media_lock = threading.RLock()
+        self.kodi_paused_players = []
+        self.mpris_paused_by_class = {}
+        self.media_control_socket = None
+        self.media_control_thread = None
+        self.freetube_aspect_thread = None
+        self.media_control_stop = threading.Event()
+        self.ui_lock = threading.Lock()
         self.ui = UInput(
             {ecodes.EV_KEY: OUTPUT_KEYS},
             name='Shield Pi Remote',
@@ -1281,8 +1351,32 @@ class ShieldRemote:
             self.cached_active = ''
         return self.cached_active
 
+    def shieldvlc_window_active(self):
+        """Treat libVLC/XWayland child windows as part of Shield VLC.
+
+        The embedded libVLC video surface can temporarily expose a generic
+        'vlc' app-id/title when focus changes to the player controls.  Without
+        this guard the daemon falls into the old desktop-VLC profile, where
+        LEFT/RIGHT are seek hotkeys.  While the Shield VLC control socket is
+        alive, any foreground VLC-looking child belongs to our TV frontend.
+        """
+        if not SHIELD_VLC_CONTROL_SOCKET.exists():
+            return False
+        active = (self.active_window() or '').lower()
+        if any(token in active for token in (
+            'shield-vlc.py', 'shield vlc tv', 'shield-vlc',
+            'org.videolan.vlc', 'vlc media player', 'vlc'
+        )):
+            return True
+        return False
+
     def profile_for_active_window(self):
         active = self.active_window().lower()
+        if self.shieldvlc_window_active():
+            if self.cached_profile != 'shieldvlc':
+                self.log(f'Shield VLC Fokus erzwungen fuer active={active!r}')
+            self.cached_profile = 'shieldvlc'
+            return 'shieldvlc'
         profiles = self.config.get('profiles', {})
         for name, spec in profiles.items():
             if name == 'generic':
@@ -1305,7 +1399,7 @@ class ShieldRemote:
     def launcher_pid(self):
         try:
             r = subprocess.run(
-                ['pgrep', '-u', CURRENT_USER, '-f', LAUNCHER_PATTERN],
+                ['pgrep', '-u', 'shield', '-f', LAUNCHER_PATTERN],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, timeout=0.5,
             )
@@ -1337,6 +1431,387 @@ class ShieldRemote:
             return False
         finally:
             sock.close()
+
+    def send_shieldvlc_control(self, command):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.sendto(command.encode('utf-8'), str(SHIELD_VLC_CONTROL_SOCKET))
+            return True
+        except Exception as e:
+            self.log(f'Shield VLC IPC fehlgeschlagen ({command}): {e}')
+            return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    # --------------------------------------------------------------
+    # Launcher <-> media lifecycle control.
+    # --------------------------------------------------------------
+    def _start_media_control_socket(self):
+        try:
+            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                REMOTE_CONTROL_SOCKET.unlink()
+            except FileNotFoundError:
+                pass
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.bind(str(REMOTE_CONTROL_SOCKET))
+            os.chmod(REMOTE_CONTROL_SOCKET, 0o600)
+            sock.settimeout(0.5)
+            self.media_control_socket = sock
+            self.media_control_stop.clear()
+            self.media_control_thread = threading.Thread(
+                target=self._media_control_loop,
+                name='shield-media-control',
+                daemon=True,
+            )
+            self.media_control_thread.start()
+            self.freetube_aspect_thread = threading.Thread(
+                target=self._freetube_aspect_guard_loop,
+                name='shield-freetube-4x3',
+                daemon=True,
+            )
+            self.freetube_aspect_thread.start()
+            print(f'Shield Mediensteuerung bereit: {REMOTE_CONTROL_SOCKET}', flush=True)
+        except Exception as e:
+            print(f'Shield Mediensteuerung Fehler: {e}', file=sys.stderr, flush=True)
+            self.media_control_socket = None
+
+    def _stop_media_control_socket(self):
+        self.media_control_stop.set()
+        sock = self.media_control_socket
+        self.media_control_socket = None
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        aspect_thread = self.freetube_aspect_thread
+        self.freetube_aspect_thread = None
+        if aspect_thread is not None and aspect_thread is not threading.current_thread():
+            aspect_thread.join(timeout=1.0)
+        try:
+            REMOTE_CONTROL_SOCKET.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def _media_control_loop(self):
+        while not self.media_control_stop.is_set():
+            sock = self.media_control_socket
+            if sock is None:
+                return
+            try:
+                raw = sock.recv(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            except Exception as e:
+                print(f'Shield Mediensteuerung Empfangsfehler: {e}', flush=True)
+                continue
+            command = raw.decode('utf-8', errors='ignore').strip()
+            try:
+                payload = json.loads(command)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                action = str(payload.get('action') or '')
+                app_class = str(payload.get('app_class') or '')
+                backend = str(payload.get('backend') or '')
+                match_hint = str(payload.get('match') or '')
+                if action == 'pause':
+                    self.pause_media_for_class(app_class, backend, match_hint)
+                elif action == 'resume':
+                    self.resume_media_for_class(app_class, backend, match_hint)
+            elif command.startswith('media_pause:'):
+                self.pause_media_for_class(command.split(':', 1)[1])
+            elif command.startswith('media_resume:'):
+                self.resume_media_for_class(command.split(':', 1)[1])
+
+    @staticmethod
+    def _media_profile_for_class(app_class):
+        return {
+            'shield-vlc': 'shieldvlc',
+            'vlc': 'vlc',
+            'freetube': 'freetube',
+            'kodi': 'kodi',
+        }.get((app_class or '').strip().lower())
+
+    def pause_media_for_class(self, app_class, backend='', match_hint=''):
+        profile = (backend or self._media_profile_for_class(app_class) or 'mpris').lower()
+        if profile == 'ignore':
+            return False
+        with self.media_lock:
+            if profile == 'shieldvlc':
+                return self.send_shieldvlc_control('launcher_pause')
+            if profile == 'freetube':
+                direct = self._freetube_launcher_pause()
+                return self._mpris_launcher_pause(app_class, profile, match_hint) or direct
+            if profile == 'kodi':
+                direct = self._kodi_launcher_pause()
+                return self._mpris_launcher_pause(app_class, profile, match_hint) or direct
+            return self._mpris_launcher_pause(app_class, profile, match_hint)
+
+    def resume_media_for_class(self, app_class, backend='', match_hint=''):
+        profile = (backend or self._media_profile_for_class(app_class) or 'mpris').lower()
+        if profile == 'ignore':
+            return False
+        with self.media_lock:
+            if profile == 'shieldvlc':
+                return self.send_shieldvlc_control('launcher_resume')
+            if profile == 'freetube':
+                direct = self._freetube_launcher_resume()
+                return self._mpris_launcher_resume(app_class) or direct
+            if profile == 'kodi':
+                direct = self._kodi_launcher_resume()
+                return self._mpris_launcher_resume(app_class) or direct
+            return self._mpris_launcher_resume(app_class)
+
+    @staticmethod
+    def _media_tokens(value):
+        ignored = {
+            'app', 'application', 'desktop', 'instance', 'media', 'mpris',
+            'org', 'player', 'service',
+        }
+        return {
+            token for token in re.split(r'[^a-z0-9]+', (value or '').lower())
+            if len(token) >= 3 and token not in ignored
+        }
+
+    def _mpris_bus(self):
+        if dbus is None:
+            return None
+        address = os.environ.get(
+            'DBUS_SESSION_BUS_ADDRESS',
+            f'unix:path={RUNTIME_DIR / "bus"}',
+        )
+        try:
+            return dbus.bus.BusConnection(address)
+        except Exception as e:
+            self.log(f'MPRIS Session-Bus nicht erreichbar: {e}')
+            return None
+
+    def _mpris_sessions(self, bus):
+        sessions = []
+        if bus is None:
+            return sessions
+        try:
+            names = bus.list_names()
+        except Exception as e:
+            self.log(f'MPRIS Namensliste fehlgeschlagen: {e}')
+            return sessions
+        for name in names:
+            name = str(name)
+            if not name.startswith('org.mpris.MediaPlayer2.'):
+                continue
+            try:
+                obj = bus.get_object(name, '/org/mpris/MediaPlayer2')
+                props = dbus.Interface(obj, 'org.freedesktop.DBus.Properties')
+                status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
+                try:
+                    identity = str(props.Get('org.mpris.MediaPlayer2', 'Identity'))
+                except Exception:
+                    identity = ''
+                try:
+                    desktop_entry = str(props.Get('org.mpris.MediaPlayer2', 'DesktopEntry'))
+                except Exception:
+                    desktop_entry = ''
+                sessions.append({
+                    'name': name,
+                    'status': status,
+                    'identity': identity,
+                    'desktop_entry': desktop_entry,
+                })
+            except Exception:
+                continue
+        return sessions
+
+    def _mpris_matches(self, session, app_class, backend, match_hint):
+        description = ' '.join((
+            session.get('name', ''),
+            session.get('identity', ''),
+            session.get('desktop_entry', ''),
+        )).lower()
+        backend = (backend or '').lower()
+        if backend == 'chromium':
+            return any(x in description for x in ('chromium', 'chrome'))
+        if backend == 'firefox':
+            return 'firefox' in description
+        if backend == 'vlc':
+            return 'vlc' in description
+        if backend == 'kodi':
+            return 'kodi' in description
+        if backend == 'freetube':
+            return 'freetube' in description
+        wanted = self._media_tokens(f'{app_class} {match_hint}')
+        present = self._media_tokens(description)
+        return bool(wanted & present)
+
+    def _mpris_launcher_pause(self, app_class, backend, match_hint):
+        key = (app_class or '').strip().lower()
+        if not key:
+            return False
+        if self.mpris_paused_by_class.get(key):
+            return True
+        bus = self._mpris_bus()
+        paused = []
+        for session in self._mpris_sessions(bus):
+            if session.get('status') != 'Playing':
+                continue
+            if not self._mpris_matches(session, app_class, backend, match_hint):
+                continue
+            try:
+                obj = bus.get_object(session['name'], '/org/mpris/MediaPlayer2')
+                player = dbus.Interface(obj, 'org.mpris.MediaPlayer2.Player')
+                player.Pause()
+                paused.append(session['name'])
+            except Exception as e:
+                self.log(f'MPRIS Pause {session.get("name")} fehlgeschlagen: {e}')
+        if paused:
+            self.mpris_paused_by_class[key] = paused
+        self.log(f'MPRIS Launcher-Pause class={app_class!r} -> {paused}')
+        return bool(paused)
+
+    def _mpris_launcher_resume(self, app_class):
+        key = (app_class or '').strip().lower()
+        names = list(self.mpris_paused_by_class.get(key) or [])
+        if not names:
+            return False
+        bus = self._mpris_bus()
+        handled = []
+        for name in names:
+            try:
+                obj = bus.get_object(name, '/org/mpris/MediaPlayer2')
+                props = dbus.Interface(obj, 'org.freedesktop.DBus.Properties')
+                status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
+                if status == 'Paused':
+                    player = dbus.Interface(obj, 'org.mpris.MediaPlayer2.Player')
+                    player.Play()
+                # Playing means somebody already resumed it; Stopped must never
+                # be started automatically.  In both cases ownership is done.
+                handled.append(name)
+            except Exception as e:
+                self.log(f'MPRIS Resume {name} fehlgeschlagen: {e}')
+        if handled:
+            remaining = [name for name in names if name not in handled]
+            if remaining:
+                self.mpris_paused_by_class[key] = remaining
+            else:
+                self.mpris_paused_by_class.pop(key, None)
+        self.log(f'MPRIS Launcher-Resume class={app_class!r} -> {handled}')
+        return bool(handled)
+
+    def _freetube_launcher_pause(self):
+        expression = r'''(function(){
+          if (window.__shieldPausedByLauncher && window.__shieldPausedVideo) {
+            return {paused:true, owned:true, time:window.__shieldPausedVideo.currentTime};
+          }
+          const videos = Array.from(document.querySelectorAll('video'));
+          const video = videos.find(v => !v.paused && !v.ended);
+          if (!video) return {paused:false, owned:false};
+          video.pause();
+          window.__shieldPausedByLauncher = true;
+          window.__shieldPausedVideo = video;
+          return {paused:video.paused, owned:true, time:video.currentTime};
+        })()'''
+        result = self._cdp_eval(expression)
+        self.log(f'FreeTube Launcher-Pause -> {result}')
+        return bool(isinstance(result, dict) and result.get('owned'))
+
+    def _freetube_launcher_resume(self):
+        expression = r'''(async function(){
+          if (!window.__shieldPausedByLauncher) return {resumed:false, owned:false};
+          const video = window.__shieldPausedVideo;
+          if (!video || !video.isConnected) return {resumed:false, owned:true};
+          try {
+            await video.play();
+            window.__shieldPausedByLauncher = false;
+            window.__shieldPausedVideo = null;
+            return {resumed:true, owned:false, time:video.currentTime};
+          } catch (error) {
+            return {resumed:false, owned:true, error:String(error)};
+          }
+        })()'''
+        result = self._cdp_eval(expression)
+        self.log(f'FreeTube Launcher-Resume -> {result}')
+        return bool(isinstance(result, dict) and result.get('resumed'))
+
+    def _kodi_rpc(self, method, params=None):
+        request = {
+            'jsonrpc': '2.0',
+            'id': int(time.monotonic() * 1000) & 0x7fffffff,
+            'method': method,
+        }
+        if params is not None:
+            request['params'] = params
+        try:
+            with socket.create_connection(('127.0.0.1', 9090), timeout=0.35) as sock:
+                sock.settimeout(0.35)
+                sock.sendall((json.dumps(request) + '\n').encode('utf-8'))
+                data = b''
+                deadline = time.monotonic() + 0.7
+                while time.monotonic() < deadline:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    try:
+                        return json.loads(data.decode('utf-8'))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            self.log(f'Kodi JSON-RPC {method} fehlgeschlagen: {e}')
+        return None
+
+    def _kodi_launcher_pause(self):
+        # A second Home press opens the task manager.  Keep ownership of the
+        # pause established by the first press instead of reclassifying it as
+        # a user pause.
+        if self.kodi_paused_players:
+            return True
+        response = self._kodi_rpc('Player.GetActivePlayers') or {}
+        players = response.get('result') or []
+        paused = []
+        for player in players:
+            player_id = player.get('playerid')
+            if player_id is None or player.get('type') not in ('audio', 'video'):
+                continue
+            props = self._kodi_rpc(
+                'Player.GetProperties',
+                {'playerid': player_id, 'properties': ['speed']},
+            ) or {}
+            speed = ((props.get('result') or {}).get('speed') or 0)
+            if speed > 0:
+                changed = self._kodi_rpc(
+                    'Player.PlayPause',
+                    {'playerid': player_id, 'play': False},
+                )
+                if changed and 'error' not in changed:
+                    paused.append(player_id)
+        self.kodi_paused_players = paused
+        self.log(f'Kodi Launcher-Pause -> {paused}')
+        return bool(paused)
+
+    def _kodi_launcher_resume(self):
+        paused = list(self.kodi_paused_players)
+        if not paused:
+            return False
+        resumed = []
+        for player_id in paused:
+            changed = self._kodi_rpc(
+                'Player.PlayPause',
+                {'playerid': player_id, 'play': True},
+            )
+            if changed and 'error' not in changed:
+                resumed.append(player_id)
+        if resumed:
+            self.kodi_paused_players = [x for x in paused if x not in resumed]
+        self.log(f'Kodi Launcher-Resume -> {resumed}')
+        return bool(resumed)
 
     def osk_visible(self):
         return OSK_MARKER.exists()
@@ -1451,33 +1926,39 @@ class ShieldRemote:
             self.log('VLC NETFLIX/VIDEO -> naechstes Hauptmenue')
 
     def emit_simple(self, keycode, value):
-        self.ui.write(ecodes.EV_KEY, keycode, value)
-        self.ui.syn()
+        with self.ui_lock:
+            self.ui.write(ecodes.EV_KEY, keycode, value)
+            self.ui.syn()
 
     def tap(self, keycode):
-        self.emit_simple(keycode, 1)
-        self.emit_simple(keycode, 0)
+        with self.ui_lock:
+            self.ui.write(ecodes.EV_KEY, keycode, 1)
+            self.ui.syn()
+            self.ui.write(ecodes.EV_KEY, keycode, 0)
+            self.ui.syn()
 
     def emit_combo(self, modifiers, keycode):
-        for mod in modifiers:
-            self.ui.write(ecodes.EV_KEY, mod, 1)
-        self.ui.write(ecodes.EV_KEY, keycode, 1)
-        self.ui.syn()
-        self.ui.write(ecodes.EV_KEY, keycode, 0)
-        for mod in reversed(modifiers):
-            self.ui.write(ecodes.EV_KEY, mod, 0)
-        self.ui.syn()
+        with self.ui_lock:
+            for mod in modifiers:
+                self.ui.write(ecodes.EV_KEY, mod, 1)
+            self.ui.write(ecodes.EV_KEY, keycode, 1)
+            self.ui.syn()
+            self.ui.write(ecodes.EV_KEY, keycode, 0)
+            for mod in reversed(modifiers):
+                self.ui.write(ecodes.EV_KEY, mod, 0)
+            self.ui.syn()
 
     # --------------------------------------------------------------
     # FreeTube: renderer-level spatial navigation via local CDP.
     # --------------------------------------------------------------
     def _cdp_close(self):
-        if self._cdp is not None:
-            try:
-                self._cdp.close()
-            except Exception:
-                pass
-        self._cdp = None
+        with self.cdp_lock:
+            if self._cdp is not None:
+                try:
+                    self._cdp.close()
+                except Exception:
+                    pass
+            self._cdp = None
 
     def _cdp_error(self, text):
         now = time.monotonic()
@@ -1485,9 +1966,10 @@ class ShieldRemote:
             print('FreeTube-Navigation:', text, flush=True)
             self._cdp_last_error = now
 
-    def _cdp_connect(self):
+    def _cdp_connect(self, quiet=False):
         if websocket is None:
-            self._cdp_error('python3-websocket fehlt')
+            if not quiet:
+                self._cdp_error('python3-websocket fehlt')
             return False
         if self._cdp is not None:
             return True
@@ -1496,7 +1978,8 @@ class ShieldRemote:
                 targets = json.loads(r.read().decode('utf-8', errors='replace'))
             pages = [t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')]
             if not pages:
-                self._cdp_error('kein FreeTube-Renderer auf Debug-Port gefunden')
+                if not quiet:
+                    self._cdp_error('kein FreeTube-Renderer auf Debug-Port gefunden')
                 return False
             pages.sort(key=lambda t: ('freetube' not in ((t.get('title') or '') + ' ' + (t.get('url') or '')).lower(),))
             url = pages[0]['webSocketDebuggerUrl']
@@ -1508,38 +1991,48 @@ class ShieldRemote:
             return True
         except Exception as e:
             self._cdp_close()
-            self._cdp_error(str(e))
+            if not quiet:
+                self._cdp_error(str(e))
             return False
 
-    def _cdp_eval(self, expression):
-        if not self._cdp_connect():
+    def _cdp_eval(self, expression, quiet=False):
+        with self.cdp_lock:
+            if not self._cdp_connect(quiet=quiet):
+                return None
+            self._cdp_id += 1
+            msg_id = self._cdp_id
+            payload = {
+                'id': msg_id,
+                'method': 'Runtime.evaluate',
+                'params': {
+                    'expression': expression,
+                    'returnByValue': True,
+                    'awaitPromise': True,
+                },
+            }
+            try:
+                self._cdp.send(json.dumps(payload))
+                deadline = time.monotonic() + 0.45
+                while time.monotonic() < deadline:
+                    raw = self._cdp.recv()
+                    obj = json.loads(raw)
+                    if obj.get('id') != msg_id:
+                        continue
+                    if 'error' in obj:
+                        raise RuntimeError(obj['error'])
+                    return (((obj.get('result') or {}).get('result') or {}).get('value'))
+            except Exception as e:
+                self._cdp_close()
+                if not quiet:
+                    self._cdp_error(str(e))
             return None
-        self._cdp_id += 1
-        msg_id = self._cdp_id
-        payload = {
-            'id': msg_id,
-            'method': 'Runtime.evaluate',
-            'params': {
-                'expression': expression,
-                'returnByValue': True,
-                'awaitPromise': True,
-            },
-        }
-        try:
-            self._cdp.send(json.dumps(payload))
-            deadline = time.monotonic() + 0.45
-            while time.monotonic() < deadline:
-                raw = self._cdp.recv()
-                obj = json.loads(raw)
-                if obj.get('id') != msg_id:
-                    continue
-                if 'error' in obj:
-                    raise RuntimeError(obj['error'])
-                return (((obj.get('result') or {}).get('result') or {}).get('value'))
-        except Exception as e:
-            self._cdp_close()
-            self._cdp_error(str(e))
-        return None
+
+    def _freetube_aspect_guard_loop(self):
+        while not self.media_control_stop.is_set():
+            result = self._cdp_eval(FT_ASPECT_4_3_INSTALL, quiet=True)
+            if isinstance(result, dict) and result.get('installed'):
+                self.log(f'FreeTube 4:3-Streckung -> {result}')
+            self.media_control_stop.wait(2.0)
 
     def freetube_command(self, command):
         expression = '(function(){' + FT_NAV_INSTALL + ';return window.__shieldNavV8.command(' + json.dumps(command) + ');})()'
@@ -1727,35 +2220,174 @@ class ShieldRemote:
             if value == 1:
                 self.log('VLC ZURUECK im Player-Modus ignoriert')
 
-    def handle_shieldvlc(self, physical_name, value):
-        """Remote mapping for our own TV-first libVLC frontend.
+    def _cancel_shieldvlc_select_timer(self):
+        timer = self.shieldvlc_select_timer
+        self.shieldvlc_select_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
 
-        The application owns all navigation state.  Netflix/VIDEO opens its
-        player control layer (F6).  MENU is intentionally unused here.
+    def _shieldvlc_long_ok_fire(self, token):
+        if (
+            self.shieldvlc_select_down is not None
+            and token == self.shieldvlc_select_token
+            and not self.shieldvlc_select_long_sent
+        ):
+            self.shieldvlc_select_long_sent = True
+            self.send_shieldvlc_control('select_long')
+            self.log('Shield VLC OK lang -> Ordner-Wiedergabeliste')
+
+    def handle_shieldvlc(self, physical_name, value):
+        """Direct control for our TV-first libVLC frontend.
+
+        Physical transport keys are dedicated to shuttle seek:
+          REWIND      -> reverse x2/x4/x8/x16/x32
+          FASTFORWARD -> forward x2/x4/x8/x16/x32
+
+        SELECT is handled by Shield VLC itself: while shuttling it resumes
+        normal playback; otherwise it opens/uses the Shield player controls.
+        MENU and NETFLIX stay deliberately free in Shield VLC.
         """
         if physical_name in ('VOLUMEUP', 'VOLUMEDOWN'):
             code = ecodes.KEY_VOLUMEUP if physical_name == 'VOLUMEUP' else ecodes.KEY_VOLUMEDOWN
             self.emit_simple(code, value)
             return
-        if physical_name == 'MENU':
+
+        if physical_name == 'SELECT':
+            now = time.monotonic()
+            if value == 1:
+                self._cancel_shieldvlc_select_timer()
+                self.shieldvlc_select_down = now
+                self.shieldvlc_select_long_sent = False
+                self.shieldvlc_select_token += 1
+                token = self.shieldvlc_select_token
+                timer = threading.Timer(
+                    self.shieldvlc_select_hold,
+                    self._shieldvlc_long_ok_fire,
+                    args=(token,),
+                )
+                timer.daemon = True
+                self.shieldvlc_select_timer = timer
+                timer.start()
+                return
+            if value == 2:
+                return
+            if value == 0:
+                started = self.shieldvlc_select_down
+                long_sent = self.shieldvlc_select_long_sent
+                self._cancel_shieldvlc_select_timer()
+                self.shieldvlc_select_down = None
+                self.shieldvlc_select_long_sent = False
+                self.shieldvlc_select_token += 1
+                if started is None or long_sent:
+                    return
+                if now - started >= self.shieldvlc_select_hold:
+                    self.send_shieldvlc_control('select_long')
+                else:
+                    self.send_shieldvlc_control('select')
+                return
+
+        if physical_name == 'REWIND':
+            if value == 1:
+                self.send_shieldvlc_control('rewind')
             return
-        mapping = {
-            'UP': ecodes.KEY_UP,
-            'DOWN': ecodes.KEY_DOWN,
-            'LEFT': ecodes.KEY_LEFT,
-            'RIGHT': ecodes.KEY_RIGHT,
-            'SELECT': ecodes.KEY_ENTER,
-            'BACK': ecodes.KEY_BACKSPACE,
-        }
-        if physical_name in mapping:
-            self.emit_simple(mapping[physical_name], value)
+
+        if physical_name == 'FASTFORWARD':
+            if value == 1:
+                self.send_shieldvlc_control('fastforward')
             return
+
+        # No special VLC function on these two keys anymore.
+        if physical_name in ('MENU', 'VIDEO'):
+            return
+
+        # Press and key-repeat navigate; releases are not needed by the TV UI.
+        if physical_name in ('UP', 'DOWN', 'LEFT', 'RIGHT'):
+            if value in (1, 2):
+                self.send_shieldvlc_control(physical_name.lower())
+            return
+
         if value != 1:
             return
-        if physical_name == 'VIDEO':
-            self.tap(ecodes.KEY_F6)
-        elif physical_name == 'PLAYPAUSE':
-            self.tap(ecodes.KEY_SPACE)
+
+        commands = {
+            'BACK': 'back',
+            'PLAYPAUSE': 'playpause',
+        }
+        command = commands.get(physical_name)
+        if command:
+            self.send_shieldvlc_control(command)
+
+    def _cancel_kodi_select_timer(self):
+        timer = self.kodi_select_timer
+        self.kodi_select_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _kodi_long_ok_fire(self, token):
+        # Timer based long-press: the physical Shield remote does not have to
+        # generate key-repeat events for Kodi's context menu to work.
+        if (
+            self.kodi_select_down is not None
+            and token == self.kodi_select_token
+            and not self.kodi_select_long_sent
+        ):
+            self.tap(ecodes.KEY_C)
+            self.kodi_select_long_sent = True
+            self.log('Kodi OK lang -> Kontextmenue (C)')
+
+    def handle_kodi(self, physical_name, code, value):
+        """Kodi: short OK = Enter, long OK = context menu (keyboard C).
+
+        Long-press is timer-driven, not dependent on EV_KEY repeat events.
+        That makes the Kodi context menu reliable with the NVIDIA Shield remote.
+        """
+        if physical_name != 'SELECT':
+            self.emit_simple(code, value)
+            return
+
+        now = time.monotonic()
+        if value == 1:
+            self._cancel_kodi_select_timer()
+            self.kodi_select_down = now
+            self.kodi_select_long_sent = False
+            self.kodi_select_token += 1
+            token = self.kodi_select_token
+            timer = threading.Timer(self.kodi_select_hold, self._kodi_long_ok_fire, args=(token,))
+            timer.daemon = True
+            self.kodi_select_timer = timer
+            timer.start()
+            return
+
+        if value == 2:
+            # Repeats are intentionally ignored.  The timer owns long-press.
+            return
+
+        if value == 0:
+            started = self.kodi_select_down
+            long_sent = self.kodi_select_long_sent
+            self._cancel_kodi_select_timer()
+            self.kodi_select_down = None
+            self.kodi_select_long_sent = False
+            self.kodi_select_token += 1
+            if started is None:
+                return
+            held = now - started
+            if long_sent:
+                return
+            if held >= self.kodi_select_hold:
+                # Fallback in case the timer thread was delayed.
+                self.tap(ecodes.KEY_C)
+                self.log('Kodi OK lang -> Kontextmenue (C, release fallback)')
+            else:
+                self.tap(ecodes.KEY_ENTER)
+                self.log('Kodi OK kurz -> Enter')
+            return
 
     def handle_browser(self, physical_name, value):
         if physical_name in ('VOLUMEUP','VOLUMEDOWN','PLAYPAUSE'):
@@ -1810,7 +2442,31 @@ class ShieldRemote:
         elif physical_name == 'PLAYPAUSE':
             self.tap(ecodes.KEY_SPACE)
 
+    def shieldvlc_transport_target_active(self):
+        """True only when our Shield VLC frontend is the foreground target."""
+        if self.shieldvlc_window_active():
+            return True
+        return SHIELD_VLC_CONTROL_SOCKET.exists() and self.cached_profile == 'shieldvlc'
+
     def dispatch(self, code, value):
+        # Shield VLC transport keys: exact raw codes measured from this remote:
+        #   << = 168 / KEY_REWIND, >> = 208 / KEY_FASTFORWARD.
+        # They bypass every profile/key-remapping layer and go directly to the
+        # Shield VLC control socket.  This is deliberately checked BEFORE the
+        # D-pad map, so LEFT/RIGHT can never masquerade as transport buttons.
+        if code in (SHIELD_KEY_REWIND, SHIELD_KEY_FASTFORWARD):
+            if self.shieldvlc_transport_target_active():
+                if value == 1:
+                    command = 'rewind' if code == SHIELD_KEY_REWIND else 'fastforward'
+                    ok = self.send_shieldvlc_control(command)
+                    print(
+                        f'Shield VLC RAW transport code={code} command={command} sent={ok}',
+                        flush=True
+                    )
+                # Release/repeat is consumed in Shield VLC. One physical press
+                # advances one shuttle stage: x2 -> x4 -> x8 -> x16 -> x32.
+                return
+
         physical_name = PHYSICAL.get(code)
         if not physical_name:
             return
@@ -1849,7 +2505,7 @@ class ShieldRemote:
         elif profile == 'vlc':
             self.handle_vlc(physical_name, value)
         elif profile == 'kodi':
-            self.emit_simple(code, value)
+            self.handle_kodi(physical_name, code, value)
         elif profile == 'browser':
             self.handle_browser(physical_name, value)
         else:
@@ -1878,24 +2534,28 @@ class ShieldRemote:
             except Exception: pass
 
     def run(self):
-        print('Shield Pi Remote Daemon v11 gestartet.', flush=True)
-        print('Mikrofon = virtuelle Tastatur | Shield VLC: Netflix = Player-Menue | Desktop-VLC V12 bleibt als Fallback', flush=True)
-        while True:
-            dev = self.find_remote()
-            if dev is None:
-                print('NVIDIA SHIELD Remote nicht gefunden; neuer Versuch in 2 s.', flush=True)
-                time.sleep(2)
-                continue
-            try:
-                self.run_device(dev)
-            except KeyboardInterrupt:
-                break
-            except OSError as e:
-                print(f'Fernbedienung getrennt/Fehler: {e}', flush=True)
-            except Exception as e:
-                print(f'Unerwarteter Fehler: {e}', file=sys.stderr, flush=True)
-            self._cdp_close()
-            time.sleep(1)
+        print('Shield Pi Remote Daemon v20 gestartet (Kodi Long-OK + Shield-VLC Ordner-Playlist + Mediensteuerung).', flush=True)
+        print('Mikrofon = virtuelle Tastatur | Kodi: OK halten=Kontext | Shield VLC: OK halten=Musikordner, Musik mit D-Pad/Transport Titel wechseln', flush=True)
+        self._start_media_control_socket()
+        try:
+            while True:
+                dev = self.find_remote()
+                if dev is None:
+                    print('NVIDIA SHIELD Remote nicht gefunden; neuer Versuch in 2 s.', flush=True)
+                    time.sleep(2)
+                    continue
+                try:
+                    self.run_device(dev)
+                except KeyboardInterrupt:
+                    break
+                except OSError as e:
+                    print(f'Fernbedienung getrennt/Fehler: {e}', flush=True)
+                except Exception as e:
+                    print(f'Unerwarteter Fehler: {e}', file=sys.stderr, flush=True)
+                self._cdp_close()
+                time.sleep(1)
+        finally:
+            self._stop_media_control_socket()
 
 
 def main():

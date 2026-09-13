@@ -1,0 +1,6 @@
+#!/bin/sh
+/usr/bin/swayidle -w \
+    timeout 2 'env YDOTOOL_SOCKET=/tmp/.ydotool_socket /usr/bin/ydotool key 56:1 125:1 35:1 35:0 125:0 56:0' \
+    >/tmp/shield-cursor-hide.log 2>&1 &
+
+"${SHIELD_HOME:-$HOME}/shield-session-start.sh" &

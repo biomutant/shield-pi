@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Shield Pi Launcher
+Comment=TV Launcher starten
+Exec=/usr/bin/python3 @HOME@/shield-launcher-test.py
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;
+StartupNotify=false

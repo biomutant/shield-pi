@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import cairo
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
@@ -14,9 +15,13 @@ except Exception:
     GdkX11 = None
 
 import json
+import math
 import os
+import re
+import signal
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -28,8 +33,10 @@ except ImportError:
 APP_ID = 'shield-vlc.py'
 APP_TITLE = 'Shield VLC TV'
 HOME = Path.home()
+SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
 CONTROL_SOCKET = RUNTIME_DIR / 'shield-vlc-control.sock'
+MPV_SOCKET = RUNTIME_DIR / 'shield-vlc-mpv.sock'
 USB_HUB = RUNTIME_DIR / 'shield-vlc-usb'
 EXTERNAL_MEDIA_TITLE = 'USB / DISC'
 STATE_DIR = HOME / '.config' / 'shield-vlc'
@@ -37,12 +44,29 @@ STATE_FILE = STATE_DIR / 'state.json'
 SETTINGS_FILE = STATE_DIR / 'settings.json'
 BG_CANDIDATES = [
     HOME / '.config' / 'shield-launcher' / 'shield-background-crt.png',
+    SCRIPT_DIR / 'assets' / 'shield-background-crt.png',
     Path(__file__).resolve().with_name('shield-background-crt.png'),
+]
+MUSIC_BG_CANDIDATES = [
+    HOME / '.config' / 'shield-vlc' / 'shield-music-military-crt-v2.png',
+    SCRIPT_DIR / 'assets' / 'shield-music-military-crt-v2.png',
+    Path(__file__).resolve().with_name('shield-music-military-crt-v2.png'),
+    HOME / '.config' / 'shield-vlc' / 'shield-music-military-v1.png',
+    SCRIPT_DIR / 'assets' / 'shield-music-military-v1.png',
+    Path(__file__).resolve().with_name('shield-music-military-v1.png'),
+]
+ANALYZER_ART_CANDIDATES = [
+    HOME / '.config' / 'shield-vlc' / 'shield-analyzer-energy-photo-v1.png',
+    SCRIPT_DIR / 'assets' / 'shield-analyzer-energy-photo-v1.png',
+    Path(__file__).resolve().with_name('shield-analyzer-energy-photo-v1.png'),
 ]
 PLAYABLE_EXTS = {
     '.3gp', '.aac', '.ac3', '.avi', '.flac', '.flv', '.m2ts', '.m4a', '.m4v',
     '.mkv', '.mov', '.mp3', '.mp4', '.mpeg', '.mpg', '.mts', '.ogg', '.ogv',
     '.opus', '.ts', '.vob', '.wav', '.webm', '.wma', '.wmv', '.m3u', '.m3u8'
+}
+AUDIO_EXTS = {
+    '.aac', '.ac3', '.flac', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.wma'
 }
 
 
@@ -65,11 +89,202 @@ def fmt_time(ms):
     return f'{m:02d}:{s:02d}'
 
 
+class MpvPlayerAdapter:
+    """Small VLC-compatible adapter for NAS playback through mpv IPC."""
+
+    def __init__(self, source, xid, on_end):
+        self.on_end = on_end
+        self.stopping = False
+        self.process = None
+        self.request_id = 0
+        try:
+            MPV_SOCKET.unlink()
+        except FileNotFoundError:
+            pass
+
+        sources = list(source) if isinstance(source, (list, tuple)) else [source]
+        command = [
+            '/usr/bin/mpv',
+            '--no-config',
+            '--really-quiet',
+            '--no-terminal',
+            '--hwdec=no',
+            '--vo=gpu',
+            '--gpu-context=x11egl',
+            f'--wid={int(xid)}',
+            '--force-window=yes',
+            '--keep-open=no',
+            '--cursor-autohide=always',
+            '--osc=no',
+            '--osd-level=0',
+            '--input-default-bindings=no',
+            f'--input-ipc-server={MPV_SOCKET}',
+            '--',
+        ]
+        command.extend(str(item) for item in sources)
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        GLib.child_watch_add(self.process.pid, self._child_exit)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if MPV_SOCKET.exists():
+                return
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.025)
+        self.stopping = True
+        try:
+            self.process.terminate()
+        except Exception:
+            pass
+        raise RuntimeError('mpv konnte nicht gestartet werden')
+
+    def _child_exit(self, _pid, _status):
+        self.process = None
+        try:
+            MPV_SOCKET.unlink()
+        except FileNotFoundError:
+            pass
+        if not self.stopping and self.on_end:
+            self.on_end()
+
+    def _command(self, *parts):
+        if not MPV_SOCKET.exists():
+            return None
+        self.request_id += 1
+        request_id = self.request_id
+        request = json.dumps({
+            'command': list(parts),
+            'request_id': request_id,
+        }) + '\n'
+        try:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.5)
+            client.connect(str(MPV_SOCKET))
+            client.sendall(request.encode('utf-8'))
+            response = b''
+            while len(response) < 65536:
+                chunk = client.recv(65536 - len(response))
+                if not chunk:
+                    break
+                response += chunk
+                while b'\n' in response:
+                    line, response = response.split(b'\n', 1)
+                    if not line:
+                        continue
+                    result = json.loads(line.decode('utf-8'))
+                    if result.get('request_id') != request_id:
+                        continue
+                    client.close()
+                    return result.get('data') if result.get('error') == 'success' else None
+            client.close()
+        except Exception:
+            pass
+        return None
+
+    def _get(self, name, default=None):
+        value = self._command('get_property', name)
+        return default if value is None else value
+
+    def _set(self, name, value):
+        return self._command('set_property', name, value)
+
+    def is_playing(self):
+        return self.process is not None and not bool(self._get('pause', True))
+
+    def play(self):
+        self._set('pause', False)
+
+    def pause(self):
+        self._command('cycle', 'pause')
+
+    def set_pause(self, paused):
+        self._set('pause', bool(paused))
+
+    def stop(self):
+        self.stopping = True
+        self._command('quit')
+
+    def set_xwindow(self, _xid):
+        return None
+
+    def get_time(self):
+        return int(float(self._get('time-pos', -1)) * 1000)
+
+    def set_time(self, value):
+        self._set('time-pos', max(0.0, float(value) / 1000.0))
+
+    def get_length(self):
+        return int(float(self._get('duration', -1)) * 1000)
+
+    def set_rate(self, value):
+        self._set('speed', float(value))
+        return 0
+
+    def playlist_next(self):
+        return self._command('playlist-next', 'force')
+
+    def playlist_previous(self):
+        return self._command('playlist-prev', 'force')
+
+    def playlist_position(self):
+        return int(self._get('playlist-pos', 0) or 0)
+
+    def playlist_count(self):
+        return int(self._get('playlist-count', 1) or 1)
+
+    def audio_get_volume(self):
+        return int(round(float(self._get('volume', 100))))
+
+    def audio_set_volume(self, value):
+        self._set('volume', float(value))
+
+    def _track_descriptions(self, track_type):
+        result = []
+        for track in self._get('track-list', []) or []:
+            if track.get('type') != track_type:
+                continue
+            ident = track.get('id')
+            try:
+                ident = int(ident)
+            except (TypeError, ValueError):
+                continue
+            label = track.get('title') or track.get('lang') or f'Spur {ident}'
+            result.append((ident, str(label)))
+        return result
+
+    def audio_get_track_description(self):
+        return self._track_descriptions('audio')
+
+    def video_get_spu_description(self):
+        return [(-1, 'Aus')] + self._track_descriptions('sub')
+
+    def audio_set_track(self, ident):
+        self._set('aid', 'no' if int(ident) < 0 else int(ident))
+
+    def video_set_spu(self, ident):
+        self._set('sid', 'no' if int(ident) < 0 else int(ident))
+
+    def video_set_aspect_ratio(self, value):
+        self._set('video-aspect-override', -1 if value in (None, 'original') else str(value))
+
+    def navigate(self, _direction):
+        return None
+
+
 class Background(Gtk.DrawingArea):
-    def __init__(self):
+    def __init__(self, candidates=None, veil=0.28, stretch=False):
         super().__init__()
         self.pixbuf = None
-        for p in BG_CANDIDATES:
+        self.veil = float(veil)
+        self.stretch = bool(stretch)
+        for p in (candidates or BG_CANDIDATES):
             if p.is_file():
                 try:
                     self.pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(p))
@@ -85,20 +300,458 @@ class Background(Gtk.DrawingArea):
         cr.fill()
         if self.pixbuf:
             w, h = self.pixbuf.get_width(), self.pixbuf.get_height()
-            scale = max(a.width / max(1, w), a.height / max(1, h))
-            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+            if self.stretch:
+                nw, nh = max(1, a.width), max(1, a.height)
+            else:
+                scale = max(a.width / max(1, w), a.height / max(1, h))
+                nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
             try:
                 pix = self.pixbuf.scale_simple(nw, nh, GdkPixbuf.InterpType.BILINEAR)
                 x, y = (a.width - nw) // 2, (a.height - nh) // 2
                 Gdk.cairo_set_source_pixbuf(cr, pix, x, y)
                 cr.paint()
                 # Dark veil so TV controls stay readable without losing the CRT landscape.
-                cr.set_source_rgba(0, 0, 0, 0.28)
+                cr.set_source_rgba(0, 0, 0, self.veil)
                 cr.rectangle(0, 0, a.width, a.height)
                 cr.fill()
             except Exception:
                 pass
         return False
+
+
+class MusicAnalyzer(Gtk.DrawingArea):
+    """CRT-readable spectrum fed by the current PulseAudio sink monitor."""
+
+    BANDS = 22
+    SAMPLE_RATE = 44100
+    CHUNK_BYTES = 2048
+
+    def __init__(self):
+        super().__init__()
+        self.set_name('music-analyzer')
+        self.set_size_request(190, 190)
+        self.levels = [0.0] * self.BANDS
+        self.targets = [0.0] * self.BANDS
+        self.peaks = [0.0] * self.BANDS
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.worker = None
+        self.process = None
+        self.frozen = False
+        self.alive = True
+        self.reference_pixbuf = None
+        self.reference_scaled = None
+        self.reference_size = None
+        for path in ANALYZER_ART_CANDIDATES:
+            if path.is_file():
+                try:
+                    self.reference_pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
+                    break
+                except Exception:
+                    pass
+        self.connect('draw', self._draw)
+        GLib.timeout_add(20, self._tick)
+
+    def start(self):
+        self.frozen = False
+        if self.worker and self.worker.is_alive():
+            return
+        self.stop_event.clear()
+        self.worker = threading.Thread(target=self._capture_loop, daemon=True)
+        self.worker.start()
+
+    def stop(self, clear=True):
+        self.stop_event.set()
+        worker = self.worker
+        process = self.process
+        if process is not None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+        self.process = None
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=0.5)
+        if self.worker is worker:
+            self.worker = None
+        self.frozen = False
+        if clear:
+            with self.lock:
+                self.targets = [0.0] * self.BANDS
+                self.levels = [0.0] * self.BANDS
+                self.peaks = [0.0] * self.BANDS
+            self.queue_draw()
+
+    def shutdown(self):
+        self.alive = False
+        self.stop(clear=False)
+
+    def set_frozen(self, frozen):
+        self.frozen = bool(frozen)
+
+    def _capture_loop(self):
+        try:
+            import numpy as np
+        except Exception as exc:
+            print(f'Shield Analyzer: NumPy fehlt: {exc}', flush=True)
+            return
+
+        window = np.hanning(self.CHUNK_BYTES // 2)
+        frequencies = np.fft.rfftfreq(window.size, 1.0 / self.SAMPLE_RATE)
+        edges = np.geomspace(55.0, 14500.0, self.BANDS + 1)
+        slices = []
+        for low, high in zip(edges[:-1], edges[1:]):
+            indices = np.flatnonzero((frequencies >= low) & (frequencies < high))
+            slices.append(indices)
+
+        while not self.stop_event.is_set():
+            process = None
+            try:
+                sink = subprocess.run(
+                    ['/usr/bin/pactl', 'get-default-sink'],
+                    check=True, capture_output=True, text=True, timeout=3,
+                ).stdout.strip()
+                if not sink:
+                    raise RuntimeError('kein Standard-Audioausgang')
+                process = subprocess.Popen(
+                    [
+                        '/usr/bin/parec', '--raw', f'--device={sink}.monitor',
+                        '--format=s16le', f'--rate={self.SAMPLE_RATE}', '--channels=1',
+                        '--latency-msec=20',
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                )
+                self.process = process
+                print(f'Shield Analyzer: Live-Signal von {sink}.monitor', flush=True)
+                while not self.stop_event.is_set():
+                    block = bytearray()
+                    while len(block) < self.CHUNK_BYTES and not self.stop_event.is_set():
+                        piece = process.stdout.read(self.CHUNK_BYTES - len(block))
+                        if not piece:
+                            break
+                        block.extend(piece)
+                    if len(block) < self.CHUNK_BYTES:
+                        break
+                    raw = bytes(block)
+                    samples = np.frombuffer(raw, dtype='<i2').astype(np.float32) / 32768.0
+                    spectrum = np.abs(np.fft.rfft(samples * window)) / window.size
+                    values = []
+                    for indices in slices:
+                        magnitude = float(np.max(spectrum[indices])) if indices.size else 0.0
+                        db = 20.0 * np.log10(max(magnitude, 1e-7))
+                        values.append(float(np.clip((db + 62.0) / 52.0, 0.0, 1.0)))
+                    with self.lock:
+                        self.targets = values
+            except Exception as exc:
+                if not self.stop_event.is_set():
+                    print(f'Shield Analyzer: Audioquelle wird erneut gesucht: {exc}', flush=True)
+            finally:
+                if process is not None:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        process.wait(timeout=1)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                self.process = None
+            if not self.stop_event.wait(1.0):
+                continue
+
+    def _tick(self):
+        if not self.alive:
+            return False
+        if self.frozen:
+            return True
+        with self.lock:
+            targets = list(self.targets)
+            for index, target in enumerate(targets):
+                current = self.levels[index]
+                speed = 0.92 if target > current else 0.42
+                current += (target - current) * speed
+                self.levels[index] = max(0.0, min(1.0, current))
+                if current >= self.peaks[index]:
+                    self.peaks[index] = current
+                else:
+                    self.peaks[index] = max(0.0, self.peaks[index] - 0.055)
+        self.queue_draw()
+        return True
+
+    def _draw(self, widget, cr):
+        allocation = self.get_allocation()
+        width, height = allocation.width, allocation.height
+        cr.set_source_rgb(0.0, 0.0, 0.0)
+        cr.paint()
+
+        with self.lock:
+            levels = list(self.levels)
+            peaks = list(self.peaks)
+
+        average = sum(levels) / max(1, len(levels))
+        bass = sum(levels[:6]) / 6.0
+        pulse = max(average, bass)
+
+        # Use the supplied image itself as the exact visual base. It is stretched
+        # into the CRT analyzer viewport so the complete artwork remains visible.
+        if self.reference_pixbuf is not None:
+            size = (max(1, width), max(1, height))
+            if self.reference_scaled is None or self.reference_size != size:
+                self.reference_scaled = self.reference_pixbuf.scale_simple(
+                    size[0], size[1], GdkPixbuf.InterpType.BILINEAR,
+                )
+                self.reference_size = size
+            if self.reference_scaled is not None:
+                Gdk.cairo_set_source_pixbuf(cr, self.reference_scaled, 0, 0)
+                cr.paint_with_alpha(0.68)
+                cr.save()
+                cr.set_operator(cairo.Operator.ADD)
+                Gdk.cairo_set_source_pixbuf(cr, self.reference_scaled, 0, 0)
+                cr.paint_with_alpha(0.08 + pulse * 0.32)
+                cr.restore()
+
+        # Fine grid ties the photographic design into the Shield interface.
+        cr.set_line_width(1.0)
+        cr.set_source_rgba(0.34, 1.0, 0.08, 0.18)
+        for y in range(18, height, 24):
+            cr.move_to(5, y + 0.5)
+            cr.line_to(width - 5, y + 0.5)
+        for x in range(8, width, 24):
+            cr.move_to(x + 0.5, 5)
+            cr.line_to(x + 0.5, height - 5)
+        cr.stroke()
+
+        cx, cy = width / 2.0, height / 2.0
+        phase = time.monotonic() * 0.85
+
+        # The bright green/yellow core mirrors the supplied energy-burst image.
+        glow_radius = 20.0 + pulse * 28.0
+        radial = cairo.RadialGradient(cx, cy, 1.0, cx, cy, glow_radius)
+        radial.add_color_stop_rgba(0.00, 1.00, 1.00, 0.88, 1.00)
+        radial.add_color_stop_rgba(0.16, 1.00, 0.95, 0.10, 0.98)
+        radial.add_color_stop_rgba(0.48, 0.35, 1.00, 0.02, 0.52)
+        radial.add_color_stop_rgba(1.00, 0.00, 0.45, 0.00, 0.00)
+        cr.set_source(radial)
+        cr.arc(cx, cy, glow_radius, 0.0, math.tau)
+        cr.fill()
+
+        # One mirrored ray pair per frequency band. Actual signal level controls
+        # ray length and endpoint, while a small phase bend keeps the shape alive.
+        points = []
+        for index, level in enumerate(levels):
+            angle = -math.pi + (math.tau * index / self.BANDS)
+            wobble = math.sin(phase + index * 1.71) * (0.025 + level * 0.045)
+            angle += wobble
+            length = 13.0 + level * 72.0
+            peak_length = 15.0 + peaks[index] * 74.0
+            bend = math.sin(phase * 1.4 + index * 0.83) * level * 13.0
+            end_x = cx + math.cos(angle) * length
+            end_y = cy + math.sin(angle) * length
+            normal_x, normal_y = -math.sin(angle), math.cos(angle)
+            control_x = cx + math.cos(angle) * length * 0.55 + normal_x * bend
+            control_y = cy + math.sin(angle) * length * 0.55 + normal_y * bend
+            points.append((end_x, end_y))
+
+            # Wide translucent pass creates the green plasma glow.
+            cr.set_line_cap(cairo.LineCap.ROUND)
+            cr.set_line_width(3.0 + level * 8.0)
+            cr.set_source_rgba(0.12, 1.00, 0.02, 0.10 + level * 0.24)
+            cr.move_to(cx, cy)
+            cr.curve_to(control_x, control_y, control_x, control_y, end_x, end_y)
+            cr.stroke()
+
+            # Sharp yellow-green filament remains clear on the CRT.
+            if level > 0.72:
+                cr.set_source_rgba(1.00, 0.28, 0.02, 0.96)
+            elif level > 0.48:
+                cr.set_source_rgba(1.00, 0.92, 0.04, 0.98)
+            else:
+                cr.set_source_rgba(0.52, 1.00, 0.03, 0.94)
+            cr.set_line_width(1.4 + level * 2.2)
+            cr.move_to(cx, cy)
+            cr.curve_to(control_x, control_y, control_x, control_y, end_x, end_y)
+            cr.stroke()
+
+            # Peak marker becomes the floating light bead seen in the reference.
+            peak_x = cx + math.cos(angle) * peak_length
+            peak_y = cy + math.sin(angle) * peak_length
+            marker = 1.6 + peaks[index] * 2.5
+            cr.set_source_rgba(1.00, 0.96, 0.30, 0.94)
+            cr.arc(peak_x, peak_y, marker, 0.0, math.tau)
+            cr.fill()
+
+        # A thin electric contour joins the moving frequency endpoints.
+        if points:
+            cr.set_source_rgba(0.48, 1.00, 0.04, 0.56)
+            cr.set_line_width(1.2)
+            cr.move_to(*points[0])
+            for point in points[1:]:
+                cr.line_to(*point)
+            cr.close_path()
+            cr.stroke()
+
+        core_radius = 3.5 + pulse * 6.5
+        cr.set_source_rgb(1.0, 1.0, 0.86)
+        cr.arc(cx, cy, core_radius, 0.0, math.tau)
+        cr.fill()
+
+        cr.set_source_rgba(0.65, 1.0, 0.12, 0.85)
+        cr.set_line_width(2.0)
+        cr.rectangle(1.0, 1.0, width - 2.0, height - 2.0)
+        cr.stroke()
+        return False
+
+
+class MilkdropView(Gtk.Socket):
+    """Embeds projectM's real MilkDrop renderer into the Shield music panel."""
+
+    WINDOW_RE = re.compile(
+        r'^\s*(0x[0-9a-f]+) "projectM": \("projectM-pulseaudio"',
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.set_name('music-milkdrop')
+        self.set_size_request(190, 190)
+        self.set_can_focus(True)
+        self.process = None
+        self.embedded_xid = 0
+        self.before_xids = set()
+        self.generation = 0
+        self.frozen = False
+        self.connect('plug-removed', self._plug_removed)
+
+    def _plug_removed(self, *args):
+        # Keep the Gtk.Socket alive so a later music session can reuse it.
+        self.embedded_xid = 0
+        return True
+
+    def _window_xids(self):
+        try:
+            output = subprocess.check_output(
+                ['/usr/bin/xwininfo', '-root', '-tree'],
+                text=True, stderr=subprocess.DEVNULL, timeout=2,
+            )
+            return {int(value, 16) for value in self.WINDOW_RE.findall(output)}
+        except Exception:
+            return set()
+
+    def start(self):
+        if self.process is not None and self.process.poll() is None:
+            if self.frozen:
+                self.set_frozen(False)
+            return
+        self.stop(clear=False)
+        self.show()
+        self.generation += 1
+        generation = self.generation
+        self.before_xids = self._window_xids()
+        env = os.environ.copy()
+        env['QT_QPA_PLATFORM'] = 'xcb'
+        env['GDK_BACKEND'] = 'x11'
+        try:
+            self.process = subprocess.Popen(
+                ['/usr/bin/projectM-pulseaudio'],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+            self.frozen = False
+            GLib.timeout_add(100, self._try_embed, generation, 0)
+        except Exception as exc:
+            self.process = None
+            print(f'Shield MilkDrop Startfehler: {exc}', flush=True)
+
+    def _try_embed(self, generation, attempt):
+        if generation != self.generation or self.process is None:
+            return False
+        if self.process.poll() is not None:
+            print('Shield MilkDrop wurde vor der Einbettung beendet', flush=True)
+            self.process = None
+            return False
+        new_xids = self._window_xids() - self.before_xids
+        if new_xids:
+            xid = sorted(new_xids)[0]
+            try:
+                self.add_id(xid)
+                self.embedded_xid = xid
+                print(f'Shield MilkDrop eingebettet: XID 0x{xid:x}', flush=True)
+                GLib.timeout_add(650, self._hide_projectm_chrome, generation)
+                return False
+            except Exception as exc:
+                print(f'Shield MilkDrop Einbettungsfehler: {exc}', flush=True)
+        if attempt >= 50:
+            print('Shield MilkDrop Fenster nicht gefunden', flush=True)
+            return False
+        GLib.timeout_add(100, self._try_embed, generation, attempt + 1)
+        return False
+
+    def _hide_projectm_chrome(self, generation):
+        if generation != self.generation:
+            return False
+        plug = self.get_plug_window()
+        if plug is None:
+            return False
+        try:
+            plug.focus(Gdk.CURRENT_TIME)
+            keyval = Gdk.keyval_from_name('b')
+            for event_type in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+                Gdk.test_simulate_key(
+                    plug, 10, 10, keyval, Gdk.ModifierType.CONTROL_MASK,
+                    event_type,
+                )
+            print('Shield MilkDrop Menü und Statusleiste ausgeblendet', flush=True)
+        except Exception as exc:
+            print(f'Shield MilkDrop Rahmensteuerung fehlgeschlagen: {exc}', flush=True)
+        return False
+
+    def set_frozen(self, frozen):
+        frozen = bool(frozen)
+        if frozen == self.frozen:
+            return
+        process = self.process
+        if process is None or process.poll() is not None:
+            self.frozen = False
+            return
+        try:
+            os.kill(process.pid, signal.SIGSTOP if frozen else signal.SIGCONT)
+            self.frozen = frozen
+        except Exception as exc:
+            print(f'Shield MilkDrop Pausefehler: {exc}', flush=True)
+
+    def stop(self, clear=True):
+        self.generation += 1
+        process = self.process
+        self.process = None
+        self.embedded_xid = 0
+        if process is not None and process.poll() is None:
+            try:
+                if self.frozen:
+                    os.kill(process.pid, signal.SIGCONT)
+                process.terminate()
+                process.wait(timeout=0.35)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=0.35)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        self.frozen = False
+
+    def shutdown(self):
+        self.stop(clear=False)
 
 
 class ShieldVlcTV(Gtk.Window):
@@ -145,6 +798,11 @@ class ShieldVlcTV(Gtk.Window):
         self.controls_visible = False
         self.current_source = None
         self.current_title = ''
+        self.blank_cursor = None
+        self.music_mode = False
+        self.music_playlist = []
+        self.music_root = None
+        self.music_index = -1
 
         # Classic shuttle seek.  For normal files we move the timeline ourselves.
         # DVD/Blu-ray forward shuttle is different: repeated set_time() calls can
@@ -165,8 +823,13 @@ class ShieldVlcTV(Gtk.Window):
         # Unix datagram socket lets our own remote daemon drive this UI directly.
         self.control_socket = None
         self.control_watch_id = 0
+        # True only when the launcher paused an actively playing item.  This
+        # prevents a later task activation from starting media that the user
+        # had already paused manually.
+        self.paused_by_launcher = False
 
         self.instance = None
+        self.vlc_player = None
         self.player = None
         if vlc is not None:
             try:
@@ -176,13 +839,15 @@ class ShieldVlcTV(Gtk.Window):
                     '--no-snapshot-preview',
                     '--network-caching=1200',
                 )
-                self.player = self.instance.media_player_new()
-                em = self.player.event_manager()
+                self.vlc_player = self.instance.media_player_new()
+                self.player = self.vlc_player
+                em = self.vlc_player.event_manager()
                 em.event_attach(vlc.EventType.MediaPlayerEndReached, self._vlc_end)
                 em.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._vlc_error)
             except Exception as e:
                 print('libVLC init error:', e, flush=True)
                 self.instance = None
+                self.vlc_player = None
                 self.player = None
 
         self._build_ui()
@@ -192,6 +857,7 @@ class ShieldVlcTV(Gtk.Window):
         self._start_control_socket()
         GLib.timeout_add(400, self._update_player_status)
         GLib.timeout_add(100, self._shuttle_tick)
+        GLib.timeout_add(120, self._update_music_animation)
 
     # ---------------- state ----------------
     def _load_json(self, path, default):
@@ -316,6 +982,9 @@ class ShieldVlcTV(Gtk.Window):
         self.browser_path = Gtk.Label(label='')
         self.browser_path.set_name('path'); self.browser_path.set_halign(Gtk.Align.START)
         self.browser_path.set_ellipsize(3)
+        self.browser_path.set_width_chars(1)
+        self.browser_path.set_max_width_chars(72)
+        self.browser_path.set_hexpand(True)
         outer.pack_start(self.browser_title, False, False, 0)
         outer.pack_start(self.browser_path, False, False, 0)
         scroll = Gtk.ScrolledWindow()
@@ -394,6 +1063,97 @@ class ShieldVlcTV(Gtk.Window):
         self.video_area.connect('realize', self._video_realize)
         overlay.add(self.video_area)
 
+        # PAL is 720x576 with non-square pixels. Stretching the exact 4:3 artwork
+        # to that raster keeps the complete composition visible on the CRT.
+        self.music_background = Background(MUSIC_BG_CANDIDATES, veil=0.02, stretch=True)
+        self.music_background.set_hexpand(True)
+        self.music_background.set_vexpand(True)
+        self.music_background.set_halign(Gtk.Align.FILL)
+        self.music_background.set_valign(Gtk.Align.FILL)
+        overlay.add_overlay(self.music_background)
+        self.music_background.hide()
+
+        self.music_panel = Gtk.Fixed()
+        self.music_panel.set_name('music-panel')
+        self.music_panel.set_halign(Gtk.Align.FILL)
+        self.music_panel.set_valign(Gtk.Align.FILL)
+        self.music_panel.set_hexpand(True)
+        self.music_panel.set_vexpand(True)
+        self.music_panel.set_size_request(720, 576)
+
+        self.music_brand = Gtk.Label(label='SHIELD  //  TACTICAL AUDIO')
+        self.music_brand.set_name('music-brand')
+        self.music_brand.set_halign(Gtk.Align.START)
+        self.music_brand.set_xalign(0.0)
+        self.music_brand.set_size_request(390, 42)
+        self.music_panel.put(self.music_brand, 286, 32)
+
+        music_art = Gtk.Frame()
+        music_art.set_name('music-art')
+        music_art.set_shadow_type(Gtk.ShadowType.NONE)
+        music_art.set_size_request(190, 190)
+        self.music_analyzer = MilkdropView()
+        music_art.add(self.music_analyzer)
+        self.music_panel.put(music_art, 54, 143)
+
+        self.music_album = Gtk.Label(label='')
+        self.music_album.set_name('music-album')
+        self.music_album.set_halign(Gtk.Align.START)
+        self.music_album.set_xalign(0.0)
+        self.music_album.set_ellipsize(3)
+        self.music_album.set_size_request(390, 30)
+        self.music_panel.put(self.music_album, 286, 137)
+
+        self.music_title = Gtk.Label(label='')
+        self.music_title.set_name('music-title')
+        self.music_title.set_halign(Gtk.Align.START)
+        self.music_title.set_xalign(0.0)
+        self.music_title.set_ellipsize(3)
+        self.music_title.set_size_request(390, 52)
+        self.music_panel.put(self.music_title, 286, 174)
+
+        self.music_counter = Gtk.Label(label='')
+        self.music_counter.set_name('music-counter')
+        self.music_counter.set_halign(Gtk.Align.START)
+        self.music_counter.set_xalign(0.0)
+        self.music_counter.set_size_request(390, 28)
+        self.music_panel.put(self.music_counter, 286, 234)
+
+        self.music_next = Gtk.Label(label='')
+        self.music_next.set_name('music-next')
+        self.music_next.set_halign(Gtk.Align.START)
+        self.music_next.set_xalign(0.0)
+        self.music_next.set_ellipsize(3)
+        self.music_next.set_size_request(390, 28)
+        self.music_panel.put(self.music_next, 286, 271)
+
+        self.music_state = Gtk.Label(label='WIEDERGABE')
+        self.music_state.set_name('music-state')
+        self.music_state.set_halign(Gtk.Align.START)
+        self.music_state.set_xalign(0.0)
+        self.music_state.set_size_request(180, 28)
+        self.music_panel.put(self.music_state, 286, 322)
+
+        self.music_time = Gtk.Label(label='00:00 / 00:00')
+        self.music_time.set_name('music-time')
+        self.music_time.set_halign(Gtk.Align.END)
+        self.music_time.set_xalign(1.0)
+        self.music_time.set_size_request(170, 28)
+        self.music_panel.put(self.music_time, 506, 322)
+
+        self.music_progress = Gtk.ProgressBar()
+        self.music_progress.set_name('music-progress')
+        self.music_progress.set_size_request(390, 15)
+        self.music_panel.put(self.music_progress, 286, 360)
+
+        music_hint = Gtk.Label(label='← / << Vorheriger Titel     OK Play/Pause     → / >> Nächster Titel     Zurück Beenden')
+        music_hint.set_name('music-hint')
+        music_hint.set_halign(Gtk.Align.CENTER)
+        music_hint.set_size_request(632, 38)
+        self.music_panel.put(music_hint, 44, 462)
+        overlay.add_overlay(self.music_panel)
+        self.music_panel.hide()
+
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         top.set_name('player-top')
         top.set_margin_top(12); top.set_margin_start(16); top.set_margin_end(16)
@@ -470,8 +1230,8 @@ class ShieldVlcTV(Gtk.Window):
         #shield-vlc-window { background: #000000; }
         #screen-title { color: #ffffff; font-size: 30px; font-weight: 800; letter-spacing: 3px; }
         #screen-subtitle { color: #d8e2d0; font-size: 16px; font-weight: 600; }
-        #path { color: #a8ff22; font-size: 16px; font-weight: bold; }
-        #footer { color: #f0f0f0; font-size: 13px; font-weight: 600; }
+        #path { color: #a8ff22; font-size: 17px; font-weight: bold; }
+        #footer { color: #f0f0f0; font-size: 14px; font-weight: 600; }
         #home-card, #list-row, #setting-row, #player-control, #menu-row {
             background: rgba(4, 10, 7, 0.94);
             color: #ffffff;
@@ -486,10 +1246,44 @@ class ShieldVlcTV(Gtk.Window):
         }
         #home-card-title { color: #ffffff; font-size: 22px; font-weight: 800; }
         #home-card-subtitle { color: #cbd8c7; font-size: 12px; font-weight: 600; }
-        #list-row { font-size: 17px; font-weight: 700; padding: 8px; }
+        #list-row { font-size: 22px; font-weight: 700; padding: 10px; }
         #setting-row { font-size: 18px; font-weight: 700; padding: 10px; }
         #network-entry { background: rgba(0,0,0,0.92); color: white; border: 3px solid #9cff1a; font-size: 20px; padding: 8px; }
         #player-page, #video-area { background: #000000; }
+        #music-panel {
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }
+        #music-brand {
+            color: #c8ff35; font-size: 23px; font-weight: 900; letter-spacing: 4px;
+            text-shadow: 0 2px 2px #000000, 0 0 7px #000000;
+        }
+        #music-art {
+            background: transparent;
+            border: 0;
+            box-shadow: none;
+        }
+        #music-album, #music-title, #music-counter, #music-next, #music-state, #music-time {
+            background: rgba(0,0,0,0.76);
+            text-shadow: 0 2px 2px #000000;
+            padding: 2px 8px;
+        }
+        #music-album { color: #c8ff35; font-size: 19px; font-weight: 900; }
+        #music-title { color: #ffffff; font-size: 31px; font-weight: 900; }
+        #music-counter { color: #ffffff; font-size: 18px; font-weight: 900; }
+        #music-next { color: #f4f4f4; font-size: 16px; font-weight: 800; }
+        #music-state { color: #c8ff35; font-size: 18px; font-weight: 900; letter-spacing: 2px; }
+        #music-time { color: #ffffff; font-size: 18px; font-weight: 900; }
+        #music-progress trough {
+            min-height: 13px; background: #000000; border: 2px solid #eaffc0; border-radius: 2px;
+        }
+        #music-progress progress { min-height: 13px; background: #baff20; border-radius: 1px; }
+        #music-hint {
+            color: #ffffff; background: rgba(0,0,0,0.88); font-size: 14px; font-weight: 900;
+            border-top: 2px solid #baff20; border-bottom: 2px solid #baff20;
+            text-shadow: 0 2px 2px #000000;
+        }
         #player-top { background: rgba(0,0,0,0.64); padding: 7px; }
         #player-title { color: white; font-size: 17px; font-weight: 800; }
         #player-time { color: #a6ff20; font-size: 16px; font-weight: 800; }
@@ -515,7 +1309,26 @@ class ShieldVlcTV(Gtk.Window):
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     # ---------------- home/navigation ----------------
+    def _set_pointer_hidden(self, hidden):
+        """Hide the pointer only inside Shield VLC while a film is visible."""
+        try:
+            display = Gdk.Display.get_default()
+            if hidden and self.blank_cursor is None and display is not None:
+                self.blank_cursor = Gdk.Cursor.new_for_display(
+                    display,
+                    Gdk.CursorType.BLANK_CURSOR,
+                )
+            cursor = self.blank_cursor if hidden else None
+            for widget in (self, self.video_area):
+                window = widget.get_window()
+                if window is not None:
+                    window.set_cursor(cursor)
+        except Exception as e:
+            print(f'Mauszeiger-Umschaltung Fehler: {e}', flush=True)
+        return False
+
     def _show_home(self):
+        self._set_pointer_hidden(False)
         self.mode = 'home'; self.stack.set_visible_child_name('home')
         self.home_index = max(0, min(self.home_index, len(self.home_buttons)-1))
         GLib.idle_add(self.home_buttons[self.home_index].grab_focus)
@@ -922,7 +1735,7 @@ class ShieldVlcTV(Gtk.Window):
         else:
             for item in self.external_items:
                 b = Gtk.Button(label=item.get('label') or 'Medium')
-                b.set_name('list-row'); b.set_size_request(-1, 52); b.set_halign(Gtk.Align.FILL)
+                b.set_name('list-row'); b.set_size_request(-1, 68); b.set_halign(Gtk.Align.FILL)
                 self.external_list.pack_start(b, False, False, 0)
         self.external_list.show_all()
         self.mode = 'external'; self.stack.set_visible_child_name('external')
@@ -1015,9 +1828,17 @@ class ShieldVlcTV(Gtk.Window):
         else:
             for p in self.browser_items:
                 prefix = '▸  ' if p.is_dir() else '▶  '
-                b = Gtk.Button(label=prefix + p.name)
-                b.set_name('list-row'); b.set_size_request(-1, 52)
-                b.set_halign(Gtk.Align.FILL)
+                label = Gtk.Label(label=prefix + p.name)
+                label.set_xalign(0.0)
+                label.set_ellipsize(3)
+                label.set_single_line_mode(True)
+                label.set_width_chars(1)
+                label.set_max_width_chars(62)
+                label.set_hexpand(True)
+                b = Gtk.Button()
+                b.add(label)
+                b.set_name('list-row'); b.set_size_request(640, 68)
+                b.set_halign(Gtk.Align.CENTER)
                 self.browser_list.pack_start(b, False, False, 0)
         self.browser_list.show_all()
 
@@ -1034,6 +1855,35 @@ class ShieldVlcTV(Gtk.Window):
             self.browser_dir = p; self.browser_index = 0; self._refresh_browser(); self._focus_browser()
         else:
             self.return_mode = 'browser'; self._play(str(p))
+
+    def _browser_activate_long(self):
+        """Long OK on a folder starts all audio files below it as one playlist."""
+        if not self.browser_items:
+            return
+        selected = self.browser_items[self.browser_index]
+        if not selected.is_dir():
+            self._browser_activate()
+            return
+        tracks = []
+        try:
+            for item in selected.rglob('*'):
+                try:
+                    if item.is_file() and item.suffix.lower() in AUDIO_EXTS:
+                        tracks.append(item)
+                except OSError:
+                    continue
+        except OSError:
+            tracks = []
+        tracks.sort(key=lambda item: str(item.relative_to(selected)).casefold())
+        if not tracks:
+            self._message(
+                'KEINE MUSIK GEFUNDEN',
+                'In diesem Ordner wurden keine abspielbaren Musikdateien gefunden.',
+                'browser',
+            )
+            return
+        self.return_mode = 'browser'
+        self._play(str(tracks[0]), playlist=[str(item) for item in tracks], music_root=selected)
 
     def _browser_back(self):
         parent = self.browser_dir.parent
@@ -1058,7 +1908,7 @@ class ShieldVlcTV(Gtk.Window):
             for src in self.recent_items:
                 name = Path(src).name if '://' not in src else src
                 b = Gtk.Button(label='▶  ' + name)
-                b.set_name('list-row'); b.set_size_request(-1, 52)
+                b.set_name('list-row'); b.set_size_request(-1, 68)
                 self.recent_list.pack_start(b, False, False, 0)
         self.recent_list.show_all()
         self._focus_recent()
@@ -1114,10 +1964,37 @@ class ShieldVlcTV(Gtk.Window):
         except Exception as e:
             print('Video-XID attach error:', e, flush=True)
 
-    def _play(self, source):
-        if not self.player or not self.instance:
+    def _nas_source(self, source):
+        if '://' in str(source):
+            return False
+        try:
+            resolved_source = Path(source).resolve()
+            resolved_nas = Path('/mnt/shield-nas').resolve()
+            return resolved_source.is_relative_to(resolved_nas)
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def _video_xid(self):
+        gw = self.video_area.get_window()
+        if gw is None:
+            raise RuntimeError('Videofläche ist noch nicht bereit')
+        return int(gw.get_xid())
+
+    def _play(self, source, playlist=None, music_root=None):
+        self.music_analyzer.stop(clear=True)
+        playlist = list(playlist or [])
+        is_audio = (
+            '://' not in str(source)
+            and Path(source).suffix.lower() in AUDIO_EXTS
+        )
+        use_mpv = bool(playlist) or self._nas_source(source)
+        if not use_mpv and (not self.vlc_player or not self.instance):
             self._message('LIBVLC FEHLT', 'python3-vlc konnte nicht geladen werden.\nInstallation: sudo apt install python3-vlc', self.return_mode)
             return
+        self.music_mode = bool(is_audio)
+        self.music_playlist = playlist or ([str(source)] if is_audio else [])
+        self.music_root = Path(music_root) if music_root is not None else (Path(source).parent if is_audio and '://' not in str(source) else None)
+        self.music_index = 0 if self.music_playlist else -1
         self.current_source = source
         if not str(source).startswith(('dvd://', 'bluray://', 'cdda://')):
             self.optical_source_device = None
@@ -1125,18 +2002,118 @@ class ShieldVlcTV(Gtk.Window):
         self.current_title = Path(source).name if '://' not in source else source
         self.player_title.set_text(self.current_title)
         self.mode = 'player'; self.stack.set_visible_child_name('player')
+        if self.music_mode:
+            self.music_background.show()
+            self.music_panel.show_all()
+            self._refresh_music_display(0)
+        else:
+            self.music_background.hide()
+            self.music_panel.hide()
+        self._set_pointer_hidden(True)
+        GLib.timeout_add(250, self._set_pointer_hidden, True)
+        GLib.timeout_add(1000, self._set_pointer_hidden, True)
         self.controls_visible = False; self.controls.hide(); self.player_top.hide(); self.menu_panel.hide()
         self.player_menu_kind = None
         self._reset_shuttle_state(resume=False)
+        self.paused_by_launcher = False
         try:
-            media = self.instance.media_new(source)
-            self.player.set_media(media)
-            self._attach_video()
-            self.player.play()
+            if self.player and self.player is not self.vlc_player:
+                self.player.stop()
+            if use_mpv:
+                if self.vlc_player:
+                    self.vlc_player.stop()
+                media_source = self.music_playlist if playlist else source
+                self.player = MpvPlayerAdapter(media_source, self._video_xid(), self._mpv_end)
+            else:
+                self.player = self.vlc_player
+                media = self.instance.media_new(source)
+                self.player.set_media(media)
+                self._attach_video()
+                self.player.play()
+            if self.music_mode:
+                self.music_analyzer.start()
             self._remember_recent(source)
             GLib.timeout_add(250, self._apply_default_aspect)
         except Exception as e:
             self._message('STARTFEHLER', str(e), self.return_mode)
+
+    def _refresh_music_display(self, forced_index=None):
+        if not self.music_mode or not self.music_playlist:
+            return False
+        index = self.music_index if forced_index is None else int(forced_index)
+        if forced_index is None and isinstance(self.player, MpvPlayerAdapter):
+            try:
+                index = self.player.playlist_position()
+            except Exception:
+                pass
+        index = max(0, min(index, len(self.music_playlist) - 1))
+        self.music_index = index
+        source = Path(self.music_playlist[index])
+        self.current_source = str(source)
+        self.current_title = source.name
+        self.player_title.set_text(source.name)
+        self.music_title.set_text(source.stem)
+
+        album = self.music_root.name if self.music_root is not None else source.parent.name
+        if self.music_root is not None:
+            try:
+                relative_parent = source.parent.relative_to(self.music_root)
+                if str(relative_parent) not in ('', '.'):
+                    album = f'{self.music_root.name}  /  {relative_parent}'
+            except (OSError, ValueError):
+                pass
+        self.music_album.set_text(album.upper())
+        self.music_counter.set_text(f'TITEL {index + 1} VON {len(self.music_playlist)}')
+        if index + 1 < len(self.music_playlist):
+            self.music_next.set_text(f'ALS NÄCHSTES  ·  {Path(self.music_playlist[index + 1]).stem}')
+        else:
+            self.music_next.set_text('LETZTER TITEL DER LISTE')
+        return False
+
+    def _update_music_animation(self):
+        """Slowly cycle the tactical accent color while the music UI is active."""
+        if not self.music_mode or self.mode != 'player':
+            return True
+        palette = (
+            (0.65, 1.00, 0.12),
+            (1.00, 0.68, 0.04),
+            (1.00, 0.18, 0.05),
+            (0.65, 1.00, 0.12),
+        )
+        position = (time.monotonic() % 12.0) / 4.0
+        index = min(2, int(position))
+        blend = position - index
+        start = palette[index]
+        end = palette[index + 1]
+        color = Gdk.RGBA(
+            start[0] + (end[0] - start[0]) * blend,
+            start[1] + (end[1] - start[1]) * blend,
+            start[2] + (end[2] - start[2]) * blend,
+            1.0,
+        )
+        for label in (self.music_brand, self.music_title, self.music_state):
+            try:
+                label.override_color(Gtk.StateFlags.NORMAL, color)
+            except Exception:
+                pass
+        return True
+
+    def _music_skip(self, direction):
+        if not self.music_mode or not isinstance(self.player, MpvPlayerAdapter):
+            return
+        try:
+            if direction > 0:
+                self.player.playlist_next()
+            else:
+                self.player.playlist_previous()
+            self.paused_by_launcher = False
+            GLib.timeout_add(120, self._refresh_music_display)
+        except Exception:
+            pass
+
+    def _mpv_end(self):
+        if self.mode == 'player' and isinstance(self.player, MpvPlayerAdapter):
+            self._stop_and_return()
 
     def _apply_default_aspect(self):
         if not self.player: return False
@@ -1147,6 +2124,8 @@ class ShieldVlcTV(Gtk.Window):
         return False
 
     def _toggle_pause(self):
+        # A deliberate user action takes ownership away from the launcher.
+        self.paused_by_launcher = False
         if self.shuttle_direction:
             self._stop_shuttle_and_play()
             return
@@ -1401,10 +2380,18 @@ class ShieldVlcTV(Gtk.Window):
         self.player_menu_kind = None; self.menu_panel.hide(); self._focus_control()
 
     def _stop_and_return(self):
+        self.music_analyzer.stop(clear=True)
         self._reset_shuttle_state(resume=False)
+        self._set_pointer_hidden(False)
         try:
             if self.player: self.player.stop()
         except Exception: pass
+        self.music_background.hide()
+        self.music_panel.hide()
+        self.music_mode = False
+        self.music_playlist = []
+        self.music_root = None
+        self.music_index = -1
         self.controls_visible = False; self.controls.hide(); self.player_top.hide(); self.menu_panel.hide(); self.player_menu_kind = None
         self.optical_source_device = None; self.optical_source_kind = None
         if self.return_mode == 'browser':
@@ -1422,17 +2409,29 @@ class ShieldVlcTV(Gtk.Window):
                 now = self.player.get_time(); length = self.player.get_length()
                 self.player_time.set_text(f'{fmt_time(now)} / {fmt_time(length)}')
                 self.progress.set_fraction(max(0.0, min(1.0, now / length))) if length and length > 0 and now >= 0 else self.progress.set_fraction(0.0)
+                if self.music_mode:
+                    self._refresh_music_display()
+                    self.music_time.set_text(f'{fmt_time(now)} / {fmt_time(length)}')
+                    fraction = max(0.0, min(1.0, now / length)) if length and length > 0 and now >= 0 else 0.0
+                    self.music_progress.set_fraction(fraction)
+                    self.music_state.set_text('WIEDERGABE' if self.player.is_playing() else 'PAUSE')
             except Exception: pass
         return True
 
     def _vlc_end(self, event):
-        GLib.idle_add(self._stop_and_return)
+        if self.player is self.vlc_player:
+            GLib.idle_add(self._stop_and_return)
 
     def _vlc_error(self, event):
-        GLib.idle_add(self._message, 'WIEDERGABEFEHLER', 'Das Medium konnte nicht abgespielt werden.', self.return_mode)
+        if self.player is self.vlc_player:
+            GLib.idle_add(self._message, 'WIEDERGABEFEHLER', 'Das Medium konnte nicht abgespielt werden.', self.return_mode)
 
     # ---------------- messages ----------------
     def _message(self, title, text, return_mode='home'):
+        self.music_analyzer.stop(clear=True)
+        self._set_pointer_hidden(False)
+        self.music_background.hide()
+        self.music_panel.hide()
         self.message_title.set_text(title); self.message_text.set_text(text)
         self.message_return_mode = return_mode
         self.mode = 'message'; self.stack.set_visible_child_name('message')
@@ -1491,6 +2490,52 @@ class ShieldVlcTV(Gtk.Window):
     def _handle_remote_command(self, command):
         # Transport keys use direct stateful commands; navigation reuses the
         # keyboard state machine below.
+        if command == 'launcher_pause':
+            if self.paused_by_launcher:
+                return
+            if not self.player or self.mode != 'player':
+                return
+            try:
+                if self.player.is_playing():
+                    self._reset_shuttle_state(resume=False)
+                    self.player.set_pause(1)
+                    self.paused_by_launcher = True
+                    if self.music_mode:
+                        self.music_analyzer.set_frozen(True)
+                    print('Shield VLC: durch Launcher pausiert', flush=True)
+            except Exception as e:
+                print(f'Shield VLC Launcher-Pause Fehler: {e}', flush=True)
+            return
+        if command == 'launcher_resume':
+            if not self.paused_by_launcher:
+                return
+            if not self.player or self.mode != 'player':
+                return
+            try:
+                self.player.play()
+                self.paused_by_launcher = False
+                if self.music_mode:
+                    self.music_analyzer.set_frozen(False)
+                print('Shield VLC: nach Task-Aktivierung fortgesetzt', flush=True)
+            except Exception as e:
+                print(f'Shield VLC Launcher-Resume Fehler: {e}', flush=True)
+            return
+        if command == 'select_long':
+            if self.mode == 'browser':
+                self._browser_activate_long()
+            else:
+                self._handle_remote_command('select')
+            return
+        if self.mode == 'player' and self.music_mode:
+            if command in ('rewind', 'seek_back'):
+                self._music_skip(-1)
+                return
+            if command in ('fastforward', 'seek_forward'):
+                self._music_skip(+1)
+                return
+            if command == 'select':
+                self._toggle_pause()
+                return
         if command in ('rewind', 'fastforward', 'seek_back', 'seek_forward'):
             print(
                 f'Shield VLC transport command={command} mode={self.mode} '
@@ -1557,17 +2602,17 @@ class ShieldVlcTV(Gtk.Window):
             self.home_index = min(len(self.home_buttons)-1, row*3+col); self.home_buttons[self.home_index].grab_focus(); return True
 
         if self.mode == 'browser':
-            if key == 'Up' and self.browser_items: self.browser_index = max(0, self.browser_index-1); self._focus_browser()
-            elif key == 'Down' and self.browser_items: self.browser_index = min(len(self.browser_items)-1, self.browser_index+1); self._focus_browser()
+            if key == 'Up' and self.browser_items: self.browser_index = (self.browser_index-1) % len(self.browser_items); self._focus_browser()
+            elif key == 'Down' and self.browser_items: self.browser_index = (self.browser_index+1) % len(self.browser_items); self._focus_browser()
             elif key in ('Return','KP_Enter'): self._browser_activate()
             elif key in ('BackSpace','Escape','Left'): self._browser_back()
             return True
 
         if self.mode == 'external':
             if key == 'Up' and self.external_items:
-                self.external_index = max(0, self.external_index-1); self._focus_external()
+                self.external_index = (self.external_index-1) % len(self.external_items); self._focus_external()
             elif key == 'Down' and self.external_items:
-                self.external_index = min(len(self.external_items)-1, self.external_index+1); self._focus_external()
+                self.external_index = (self.external_index+1) % len(self.external_items); self._focus_external()
             elif key in ('Return','KP_Enter'):
                 self._activate_external()
             elif key in ('BackSpace','Escape','Left'):
@@ -1575,8 +2620,8 @@ class ShieldVlcTV(Gtk.Window):
             return True
 
         if self.mode == 'recent':
-            if key == 'Up' and self.recent_items: self.recent_index = max(0, self.recent_index-1); self._focus_recent()
-            elif key == 'Down' and self.recent_items: self.recent_index = min(len(self.recent_items)-1, self.recent_index+1); self._focus_recent()
+            if key == 'Up' and self.recent_items: self.recent_index = (self.recent_index-1) % len(self.recent_items); self._focus_recent()
+            elif key == 'Down' and self.recent_items: self.recent_index = (self.recent_index+1) % len(self.recent_items); self._focus_recent()
             elif key in ('Return','KP_Enter') and self.recent_items: self.return_mode='recent'; self._play(self.recent_items[self.recent_index])
             elif key in ('BackSpace','Escape','Left'): self._show_home()
             return True
@@ -1590,8 +2635,8 @@ class ShieldVlcTV(Gtk.Window):
             return False
 
         if self.mode == 'settings':
-            if key == 'Up': self.settings_index = max(0, self.settings_index-1); self._focus_settings()
-            elif key == 'Down': self.settings_index = min(len(self.setting_buttons)-1, self.settings_index+1); self._focus_settings()
+            if key == 'Up' and self.setting_buttons: self.settings_index = (self.settings_index-1) % len(self.setting_buttons); self._focus_settings()
+            elif key == 'Down' and self.setting_buttons: self.settings_index = (self.settings_index+1) % len(self.setting_buttons); self._focus_settings()
             elif key in ('Return','KP_Enter'): self._activate_setting()
             elif key in ('BackSpace','Escape','Left'): self._show_home()
             return True
@@ -1601,6 +2646,16 @@ class ShieldVlcTV(Gtk.Window):
             return True
 
         if self.mode == 'player':
+            if self.music_mode and not self.player_menu_kind:
+                if key in ('Return', 'KP_Enter', 'Space', 'space'):
+                    self._toggle_pause()
+                elif key == 'Left':
+                    self._music_skip(-1)
+                elif key == 'Right':
+                    self._music_skip(+1)
+                elif key in ('BackSpace', 'Escape'):
+                    self._stop_and_return()
+                return True
             # Netflix key is remapped to F6 by shield-remote.
             if key == 'F6':
                 if self.player_menu_kind:
@@ -1612,8 +2667,8 @@ class ShieldVlcTV(Gtk.Window):
             if key == 'Space': self._toggle_pause(); return True
 
             if self.player_menu_kind:
-                if key == 'Up': self.player_menu_index = max(0, self.player_menu_index-1); self._focus_player_menu()
-                elif key == 'Down': self.player_menu_index = min(len(self.player_menu_items)-1, self.player_menu_index+1); self._focus_player_menu()
+                if key == 'Up' and self.player_menu_items: self.player_menu_index = (self.player_menu_index-1) % len(self.player_menu_items); self._focus_player_menu()
+                elif key == 'Down' and self.player_menu_items: self.player_menu_index = (self.player_menu_index+1) % len(self.player_menu_items); self._focus_player_menu()
                 elif key in ('Return','KP_Enter'): self._activate_player_menu()
                 elif key in ('BackSpace','Escape','Left'): self.player_menu_kind=None; self.menu_panel.hide(); self._focus_control()
                 return True
@@ -1656,6 +2711,7 @@ class ShieldVlcTV(Gtk.Window):
         return False
 
     def _on_destroy(self, *args):
+        self.music_analyzer.shutdown()
         self._reset_shuttle_state(resume=False)
         try:
             if self.player: self.player.stop()

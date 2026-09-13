@@ -14,6 +14,10 @@ This is a curated history, not every experiment.
 
 ## Remote / media
 
+- Stable 2026-09-12 — three-card task manager, persistent per-application
+  previews, general media pause/resume, corrected Shield VLC video timing,
+  NAS navigation, recursive folder music playback and embedded
+  projectM/MilkDrop visualization confirmed on the Raspberry Pi 4 CRT system.
 - Current remote recovery snapshot preserves working Shield Remote behavior.
 - Shield VLC v20 contains the latest dedicated DVD shuttle/seek work available in this handoff.
 - FreeTube navigation restore preserves the established remote-debugging control path.

@@ -26,6 +26,7 @@ import datetime
 import math
 import re
 import signal
+import socket
 import json
 import time
 import configparser
@@ -33,33 +34,43 @@ import shlex
 import hashlib
 from html import escape as xml_escape
 
-
-USER_HOME = os.path.expanduser("~")
+USER_HOME = os.environ.get("SHIELD_HOME") or os.path.expanduser("~")
 NORDVPN_APP = os.path.join(USER_HOME, "nordvpn-app.py")
+SHIELD_VLC_APP = os.path.join(USER_HOME, "shield-vlc.py")
 SHIELD_TASKS_HELPER = os.path.join(USER_HOME, "shield-tasks", "shield-tasks")
-DEFAULT_XDG_RUNTIME_DIR = f"/run/user/{os.getuid()}"
+DEFAULT_XDG_RUNTIME_DIR = os.environ.get(
+    "XDG_RUNTIME_DIR",
+    f"/run/user/{os.getuid()}",
+)
 
+REMOTE_CONTROL_SOCKET = os.path.join(
+    DEFAULT_XDG_RUNTIME_DIR,
+    "shield-remote-control.sock"
+)
 
 APPS = [
     {
         "name": "VLC",
-        "subtitle": "Media Player",
+        "subtitle": "Shield TV",
         "command": [
             "/usr/bin/env",
-            "QT_QPA_PLATFORM=xcb",
-            "/usr/bin/vlc"
+            "GDK_BACKEND=x11",
+            "/usr/bin/python3",
+            SHIELD_VLC_APP
         ],
-        "class": "vlc",
-        "match": ["vlc"],
+        "class": "shield-vlc",
+        "match": ["shield-vlc.py", "Shield VLC TV", "shield-vlc"],
+        "media_backend": "shieldvlc",
         "icon": "vlc"
     },
     {
-        "name": "FreeTube",
+        "name": "YouTube",
         "subtitle": "",
         "command": [
             "/usr/bin/freetube",
-            "--ozone-platform=wayland",
-            "--disable-gpu"
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=9222",
+            "--remote-allow-origins=*"
         ],
         "class": "freetube",
         "match": [
@@ -67,25 +78,31 @@ APPS = [
             "freetube",
             "io.freetubeapp.FreeTube"
         ],
+        "media_backend": "freetube",
         "special_icon": "freetube"
     },
     {
-        "name": "KODI",
+        "name": "Kodi",
         "subtitle": "",
         "command": ["/usr/bin/kodi"],
         "class": "kodi",
         "match": ["kodi"],
+        "media_backend": "kodi",
         "icon": "kodi"
     },
     {
         "name": "NordVPN",
         "subtitle": "",
         "command": [
+            "/usr/bin/env",
+            "GDK_SCALE=1",
+            "GDK_DPI_SCALE=1.0",
             "/usr/bin/python3",
             NORDVPN_APP
         ],
-        "class": "nordvpn",
-        "match": ["nordvpn", "nordvpn-app.py"],
+        "class": "shield-nordvpn",
+        "match": ["shield-nordvpn", "Shield NordVPN", "nordvpn-app.py"],
+        "media_policy": "ignore",
         "icon_file": os.path.expanduser(
             "~/.local/share/icons/NordVPN.png"
         ),
@@ -123,7 +140,8 @@ SYSTEM_APPS = [
     {
         "name": "Neustart",
         "command": [
-            "systemctl",
+            "/usr/bin/systemctl",
+            "--check-inhibitors=no",
             "reboot"
         ],
         "special_icon": "restart"
@@ -131,7 +149,8 @@ SYSTEM_APPS = [
     {
         "name": "Ausschalten",
         "command": [
-            "systemctl",
+            "/usr/bin/systemctl",
+            "--check-inhibitors=no",
             "poweroff"
         ],
         "special_icon": "power"
@@ -156,13 +175,20 @@ SYSTEM_HEIGHT = 84
 APP_ICON_SIZE = 58
 SYSTEM_ICON_SIZE = 38
 APP_CARD_WIDTH = (SCREEN_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - (APP_SPACING * 3)) // 4
-TASKS_VISIBLE = 4
+TASKS_VISIBLE = 3
+TASK_CARD_WIDTH = 216
+TASK_CARD_HEIGHT = 270
+TASK_PREVIEW_WIDTH = 204
+TASK_PREVIEW_HEIGHT = round(TASK_PREVIEW_WIDTH * SCREEN_HEIGHT / SCREEN_WIDTH)
+TASK_HEADER_ICON_SIZE = 28
+TASK_DELETE_SHIFT = 18
 
 LABWC_RC = os.path.expanduser("~/.config/labwc/rc.xml")
 WORKSPACE_AUTO_BEGIN = "<!-- SHIELD-AUTO-WORKSPACES-BEGIN -->"
 WORKSPACE_AUTO_END = "<!-- SHIELD-AUTO-WORKSPACES-END -->"
 LAUNCHER_APP_ID = "shield-launcher-test.py"
 KNOWN_APP_IDS = {
+    "shield-vlc": "shield-vlc.py",
     "vlc": "vlc",
     "freetube": "FreeTube",
     "kodi": "kodi",
@@ -273,9 +299,9 @@ class ShieldBackground(Gtk.DrawingArea):
 
 class YouTubeLogo(Gtk.DrawingArea):
 
-    def __init__(self):
+    def __init__(self, width=57, height=46):
         super().__init__()
-        self.set_size_request(57, 46)
+        self.set_size_request(width, height)
         self.connect("draw", self.draw_logo)
 
     def draw_logo(self, widget, cr):
@@ -287,7 +313,7 @@ class YouTubeLogo(Gtk.DrawingArea):
 
         x = (width - box_width) / 2
         y = (height - box_height) / 2
-        radius = 9
+        radius = max(4, min(9, box_height * 0.24))
 
         cr.new_sub_path()
 
@@ -327,9 +353,10 @@ class YouTubeLogo(Gtk.DrawingArea):
         cx = width / 2 + 2
         cy = height / 2
 
-        cr.move_to(cx - 7, cy - 10)
-        cr.line_to(cx + 10, cy)
-        cr.line_to(cx - 7, cy + 10)
+        triangle = max(5, min(10, box_height * 0.26))
+        cr.move_to(cx - triangle * 0.70, cy - triangle)
+        cr.line_to(cx + triangle, cy)
+        cr.line_to(cx - triangle * 0.70, cy + triangle)
         cr.close_path()
 
         cr.set_source_rgb(1, 1, 1)
@@ -460,6 +487,7 @@ class ShieldLauncher(Gtk.Window):
         self.osk_device_grabbed = False
 
         self.icon_theme = Gtk.IconTheme.get_default()
+        self.blank_cursor = None
 
         self.state_dir = os.path.expanduser("~/.config/shield-launcher")
         self.thumb_dir = os.path.join(self.state_dir, "thumbnails")
@@ -493,6 +521,11 @@ class ShieldLauncher(Gtk.Window):
         )
 
         self.show_all()
+        self._hide_shield_pointer()
+        self._park_wayland_pointer()
+        GLib.timeout_add(250, self._park_wayland_pointer)
+        GLib.timeout_add(1000, self._park_wayland_pointer)
+        GLib.timeout_add(250, self._hide_shield_pointer)
         self.launcher_foreground = True
         self.focus_current()
 
@@ -500,6 +533,43 @@ class ShieldLauncher(Gtk.Window):
         # the /dev/input/event number changes. Menu/Super toggles the OSK.
         GLib.timeout_add_seconds(1, self._ensure_osk_remote_device)
 
+
+    def _hide_shield_pointer(self):
+        """Hide the pointer on Shield-owned windows without changing other apps."""
+        try:
+            display = Gdk.Display.get_default()
+            if self.blank_cursor is None and display is not None:
+                self.blank_cursor = Gdk.Cursor.new_for_display(
+                    display,
+                    Gdk.CursorType.BLANK_CURSOR,
+                )
+            for widget in (
+                self,
+                self.task_window,
+                self.app_picker_window,
+                self.remove_confirm_window,
+                self.osk_window,
+            ):
+                if widget is None:
+                    continue
+                window = widget.get_window()
+                if window is not None:
+                    window.set_cursor(self.blank_cursor)
+        except Exception:
+            pass
+        return True
+
+    def _park_wayland_pointer(self):
+        """Move the unused compositor pointer completely beyond the visible edge."""
+        try:
+            subprocess.Popen(
+                ['/usr/bin/ydotool', 'mousemove', '--delay', '0', '2000', '2000'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+        return False
 
     def on_taskmanager_signal(self):
         now = time.monotonic()
@@ -1267,19 +1337,44 @@ class ShieldLauncher(Gtk.Window):
         }
 
         #task-card {
-            background-color: rgba(12, 24, 34, 0.96);
-            border: 2px solid rgba(90,120,145,0.75);
-            border-radius: 12px;
+            background: transparent;
+            background-image: none;
+            border: none;
+            border-radius: 0;
+            box-shadow: none;
+            padding: 0;
         }
 
         #task-card:focus {
-            border: 4px solid #9cff1a;
-            box-shadow: 0px 0px 10px rgba(130,255,0,0.90);
+            background: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+            outline: none;
+        }
+
+        #task-preview {
+            background: #000000;
+            border: 1px solid rgba(126, 205, 35, 0.40);
+            border-radius: 3px;
+        }
+
+        #task-preview-selected {
+            background: #000000;
+            border: 3px solid #9cff00;
+            border-radius: 3px;
+            box-shadow: 0 0 8px rgba(140, 255, 0, 0.60);
+        }
+
+        #task-preview-delete {
+            background: #000000;
+            border: 2px solid #f2f2f2;
+            border-radius: 3px;
         }
 
         #task-name {
             color: white;
-            font-size: 13px;
+            font-size: 17px;
             font-weight: bold;
         }
 
@@ -1327,8 +1422,14 @@ class ShieldLauncher(Gtk.Window):
         }
 
         #task-delete {
-            color: #ff3b30;
-            font-size: 20px;
+            color: #f5f5f5;
+            font-size: 17px;
+            font-weight: bold;
+        }
+
+        #task-delete-symbol {
+            color: #f5f5f5;
+            font-size: 25px;
             font-weight: bold;
         }
 
@@ -1772,10 +1873,13 @@ class ShieldLauncher(Gtk.Window):
             self.message(item["name"] + " ist noch nicht eingerichtet.")
             return
 
-        if command and command[0] == "systemctl":
+        if command and os.path.basename(command[0]) == "systemctl":
             self.sync_task_states()
             try:
-                subprocess.Popen(command)
+                subprocess.Popen(
+                    command,
+                    start_new_session=True,
+                )
             except Exception as e:
                 self.message("Startfehler:\n" + str(e))
             return
@@ -2124,6 +2228,10 @@ class ShieldLauncher(Gtk.Window):
         self.deiconify()
         self.present()
         self.fullscreen()
+        self._hide_shield_pointer()
+        self._park_wayland_pointer()
+        GLib.timeout_add(250, self._park_wayland_pointer)
+        GLib.timeout_add(1000, self._park_wayland_pointer)
         self.launcher_foreground = True
         while Gtk.events_pending():
             Gtk.main_iteration_do(False)
@@ -2143,6 +2251,12 @@ class ShieldLauncher(Gtk.Window):
             return {"class": "", "name": "", "window_app_id": "", "title": "", "thumbnail": "", "was_active": False}
         for e in self.recent_tasks:
             if e.get("class") == app_class:
+                # Never trust a persisted thumbnail path from another task.
+                # Every class owns exactly one canonical preview file.
+                e["thumbnail"] = os.path.join(
+                    self.thumb_dir,
+                    app_class + ".png"
+                )
                 return e
         # Defensive: remove any accidental duplicates of this class
         self.recent_tasks = [e for e in self.recent_tasks if e.get("class") != app_class]
@@ -2167,12 +2281,16 @@ class ShieldLauncher(Gtk.Window):
             out = []
             seen = set()
             for x in data:
-                if not isinstance(x, dict) or not x.get("was_active"):
+                if not isinstance(x, dict):
                     continue
                 cls = x.get("class")
                 if not cls or cls in seen:
                     continue
                 seen.add(cls)
+                # A tile is persistent until the user explicitly discards it
+                # with X.  Running state is refreshed separately and must not
+                # decide whether the saved tile survives a reboot.
+                x["thumbnail"] = os.path.join(self.thumb_dir, cls + ".png")
                 out.append(x)
             return out
         except Exception:
@@ -2200,13 +2318,78 @@ class ShieldLauncher(Gtk.Window):
         self.save_recent_tasks()
 
 
+    def compositor_active_app_id(self):
+        """Return the real active Wayland/XWayland app-id without its title."""
+        env = os.environ.copy()
+        env.setdefault("XDG_RUNTIME_DIR", DEFAULT_XDG_RUNTIME_DIR)
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        try:
+            r = subprocess.run(
+                ["wlrctl", "toplevel", "list", "state:active"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1
+            )
+            for line in r.stdout.splitlines():
+                app_id = line.split(":", 1)[0].strip()
+                if app_id:
+                    return app_id
+        except Exception:
+            pass
+        return ""
+
+    def class_for_active_app_id(self, app_id):
+        """Resolve the active compositor window to exactly one launcher task."""
+        app_id = (app_id or "").strip()
+        if not app_id or app_id == LAUNCHER_APP_ID:
+            return None
+
+        by_class = {
+            e.get("class"): e for e in self.recent_tasks if e.get("class")
+        }
+        classes = []
+        if self.foreground_task_class:
+            classes.append(self.foreground_task_class)
+        classes.extend(e.get("class") for e in self.recent_tasks)
+        classes.extend(cfg.get("class") for cfg in self.managed_app_configs())
+
+        for app_class in dict.fromkeys(x for x in classes if x):
+            entry = by_class.get(app_class) or {
+                "class": app_class,
+                "window_app_id": (
+                    (self.workspace_map.get(app_class) or {}).get("app_id") or ""
+                )
+            }
+            if self.task_matches_entry({"app_id": app_id}, entry):
+                return app_class
+
+        # Shield VLC may temporarily expose its embedded libVLC/XWayland child
+        # as plain "vlc".  Accept that child only while Shield VLC is the
+        # remembered foreground task and its private control socket exists.
+        if (
+            self.foreground_task_class == "shield-vlc"
+            and "vlc" in app_id.lower()
+            and os.path.exists(os.path.join(DEFAULT_XDG_RUNTIME_DIR, "shield-vlc-control.sock"))
+        ):
+            return "shield-vlc"
+        return None
+
     def capture_foreground_thumbnail(self):
         if self.launcher_foreground:
             return
-        if not self.foreground_task_class:
+
+        active_app_id = self.compositor_active_app_id()
+        app_class = self.class_for_active_app_id(active_app_id)
+        if not app_class:
             return
 
-        e = self.ensure_recent_entry(self.foreground_task_class)
+        # The compositor is authoritative.  This prevents a newly started app
+        # from ever being written into the previous task's preview file.
+        self.foreground_task_class = app_class
+
+        e = self.ensure_recent_entry(app_class)
 
         # Do not overwrite a good application preview with the launcher
         # if the remembered task is no longer actually open.
@@ -2214,10 +2397,7 @@ class ShieldLauncher(Gtk.Window):
         if active is None:
             return
 
-        p = e.get("thumbnail") or os.path.join(
-            self.thumb_dir,
-            self.foreground_task_class + ".png"
-        )
+        p = os.path.join(self.thumb_dir, app_class + ".png")
         e["thumbnail"] = p
 
         tmp = p + ".new"
@@ -2399,18 +2579,13 @@ class ShieldLauncher(Gtk.Window):
 
         outer = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
-            spacing=12
+            spacing=0
         )
-        outer.set_margin_top(24)
+        outer.set_margin_top(18)
         outer.set_margin_bottom(18)
         outer.set_margin_start(LEFT_MARGIN)
         outer.set_margin_end(RIGHT_MARGIN)
         w.add(outer)
-
-        title = Gtk.Label(label="Letzte Anwendungen")
-        title.set_name("task-title")
-        title.set_halign(Gtk.Align.START)
-        outer.pack_start(title, False, False, 0)
 
         self.task_cards_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -2420,25 +2595,45 @@ class ShieldLauncher(Gtk.Window):
         self.task_cards_box.set_valign(Gtk.Align.CENTER)
         outer.pack_start(self.task_cards_box, True, True, 0)
 
-        self.task_delete_label = Gtk.Label(
-            label="✕  Beenden / entfernen"
-        )
-        self.task_delete_label.set_name("task-delete")
-        self.task_delete_label.set_no_show_all(True)
-        self.task_delete_label.hide()
-        outer.pack_end(self.task_delete_label, False, False, 0)
-
-        hint = Gtk.Label(
-            label="← → Auswählen    OK Öffnen    ↓ Löschen    ↑ Abbrechen    Home Launcher"
-        )
-        hint.set_name("footer")
-        outer.pack_end(hint, False, False, 0)
-
         w.show_all()
-        self.task_delete_label.hide()
+        self._hide_shield_pointer()
+        self._park_wayland_pointer()
+        GLib.timeout_add(250, self._park_wayland_pointer)
+        GLib.timeout_add(1000, self._park_wayland_pointer)
         self.render_task_cards()
         self.focus_task()
         return False
+
+    def load_task_icon(self, item):
+        if item.get("special_icon") in ("freetube", "youtube"):
+            return YouTubeLogo(TASK_HEADER_ICON_SIZE + 2, TASK_HEADER_ICON_SIZE - 4)
+
+        icon_file = item.get("icon_file")
+        if icon_file and os.path.isfile(icon_file):
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    icon_file,
+                    TASK_HEADER_ICON_SIZE,
+                    TASK_HEADER_ICON_SIZE,
+                    True
+                )
+                return Gtk.Image.new_from_pixbuf(pixbuf)
+            except Exception:
+                pass
+
+        for icon_name in (item.get("icon"), "application-x-executable"):
+            if not icon_name:
+                continue
+            try:
+                pixbuf = self.icon_theme.load_icon(
+                    icon_name,
+                    TASK_HEADER_ICON_SIZE,
+                    0
+                )
+                return Gtk.Image.new_from_pixbuf(pixbuf)
+            except Exception:
+                pass
+        return None
 
     def render_task_cards(self):
         if self.task_cards_box is None or not self.task_items:
@@ -2469,27 +2664,71 @@ class ShieldLauncher(Gtk.Window):
             self.task_view_start + TASKS_VISIBLE
         ]
 
-        thumb_width = APP_CARD_WIDTH - 18
-        thumb_height = 56
-
         for offset, t in enumerate(visible):
             global_index = self.task_view_start + offset
+            selected = global_index == self.task_index
+            delete_selected = selected and self.task_delete_mode
 
             b = Gtk.Button()
             b.set_name("task-card")
-            b.set_size_request(APP_CARD_WIDTH, APP_HEIGHT)
+            b.set_size_request(TASK_CARD_WIDTH, TASK_CARD_HEIGHT)
+            b.set_valign(Gtk.Align.START)
             b.connect(
                 "clicked",
                 self.activate_task_index,
                 global_index
             )
 
-            box = Gtk.Box(
+            root = Gtk.Box(
                 orientation=Gtk.Orientation.VERTICAL,
-                spacing=1
+                spacing=0
             )
-            box.set_halign(Gtk.Align.FILL)
-            box.set_valign(Gtk.Align.CENTER)
+            root.set_halign(Gtk.Align.CENTER)
+            root.set_valign(Gtk.Align.START)
+
+            tile = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL,
+                spacing=5
+            )
+            tile.set_halign(Gtk.Align.CENTER)
+            tile.set_valign(Gtk.Align.START)
+            if delete_selected:
+                tile.set_margin_top(TASK_DELETE_SHIFT)
+
+            cfg = self.app_config(t.get("class")) or {}
+            header = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                spacing=7
+            )
+            header.set_size_request(TASK_PREVIEW_WIDTH, 30)
+            header.set_halign(Gtk.Align.START)
+            header.set_valign(Gtk.Align.CENTER)
+
+            icon = self.load_task_icon(cfg)
+            if icon is not None:
+                icon.set_valign(Gtk.Align.CENTER)
+                header.pack_start(icon, False, False, 0)
+
+            name = Gtk.Label(
+                label=(cfg.get("name") or t.get("name") or t.get("title") or t.get("class"))
+            )
+            name.set_name("task-name")
+            name.set_halign(Gtk.Align.START)
+            name.set_valign(Gtk.Align.CENTER)
+            name.set_ellipsize(3)
+            name.set_max_width_chars(17)
+            header.pack_start(name, True, True, 0)
+            tile.pack_start(header, False, False, 0)
+
+            preview = Gtk.Frame()
+            preview.set_shadow_type(Gtk.ShadowType.NONE)
+            preview.set_size_request(TASK_PREVIEW_WIDTH, TASK_PREVIEW_HEIGHT)
+            if delete_selected:
+                preview.set_name("task-preview-delete")
+            elif selected:
+                preview.set_name("task-preview-selected")
+            else:
+                preview.set_name("task-preview")
 
             added = False
             p = t.get("thumbnail")
@@ -2498,40 +2737,44 @@ class ShieldLauncher(Gtk.Window):
                 try:
                     pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
                         p,
-                        thumb_width,
-                        thumb_height,
+                        TASK_PREVIEW_WIDTH,
+                        TASK_PREVIEW_HEIGHT,
                         True
                     )
                     image = Gtk.Image.new_from_pixbuf(pix)
-                    box.pack_start(image, False, False, 0)
+                    image.set_halign(Gtk.Align.CENTER)
+                    image.set_valign(Gtk.Align.CENTER)
+                    preview.add(image)
                     added = True
                 except Exception:
                     pass
 
             if not added:
-                cfg = self.app_config(t.get("class")) or {}
-                icon = self.load_app_icon(cfg) if cfg else None
-                if icon:
-                    box.pack_start(icon, False, False, 0)
+                fallback = self.load_app_icon(cfg) if cfg else None
+                if fallback:
+                    fallback.set_halign(Gtk.Align.CENTER)
+                    fallback.set_valign(Gtk.Align.CENTER)
+                    preview.add(fallback)
 
-            name = Gtk.Label(
-                label=t.get("name") or t.get("title") or t.get("class")
-            )
-            name.set_name("task-name")
-            name.set_ellipsize(3)
-            name.set_max_width_chars(16)
-            name.set_justify(Gtk.Justification.CENTER)
-            box.pack_start(name, False, False, 0)
+            tile.pack_start(preview, False, False, 0)
+            root.pack_start(tile, False, False, 0)
 
-            st = Gtk.Label(
-                label="AKTIV" if t.get("active") else "BEREIT"
-            )
-            st.set_name(
-                "task-active" if t.get("active") else "task-inactive"
-            )
-            box.pack_start(st, False, False, 0)
+            if delete_selected:
+                delete_box = Gtk.Box(
+                    orientation=Gtk.Orientation.VERTICAL,
+                    spacing=0
+                )
+                delete_box.set_halign(Gtk.Align.CENTER)
+                symbol = Gtk.Label(label="ⓧ")
+                symbol.set_name("task-delete-symbol")
+                caption = Gtk.Label(label="Verwerfen")
+                caption.set_name("task-delete")
+                delete_box.pack_start(symbol, False, False, 0)
+                delete_box.pack_start(caption, False, False, 0)
+                root.pack_start(delete_box, False, False, 1)
+                self.task_delete_label = delete_box
 
-            b.add(box)
+            b.add(root)
             self.task_cards_box.pack_start(b, False, False, 0)
             self.task_buttons.append(b)
 
@@ -2584,13 +2827,12 @@ class ShieldLauncher(Gtk.Window):
 
         elif key == "Down" and self.task_items:
             self.task_delete_mode = True
-            if self.task_delete_label:
-                self.task_delete_label.show()
+            self.render_task_cards()
+            self.focus_task()
 
         elif key == "Up" and self.task_delete_mode:
             self.task_delete_mode = False
-            if self.task_delete_label:
-                self.task_delete_label.hide()
+            self.render_task_cards()
             self.focus_task()
 
         elif key in ("Return", "KP_Enter"):
@@ -2747,6 +2989,62 @@ class ShieldLauncher(Gtk.Window):
                 break
         return self.find_active_task(e)
 
+    def notify_remote_media(self, action, app_class):
+        """Ask shield-remote to pause/resume media without touching the app."""
+        if action not in ("pause", "resume") or not app_class:
+            return False
+        cfg = self.app_config(app_class) or {}
+        policy = str(cfg.get("media_policy", "auto")).strip().lower()
+        if policy == "ignore":
+            return False
+
+        backend = str(cfg.get("media_backend", "")).strip().lower()
+        if not backend:
+            parts = [app_class, cfg.get("desktop_id", "")]
+            parts.extend(str(x) for x in (cfg.get("command") or []))
+            haystack = " ".join(str(x) for x in parts if x).lower()
+            if "shield-vlc" in haystack:
+                backend = "shieldvlc"
+            elif "freetube" in haystack:
+                backend = "freetube"
+            elif "kodi" in haystack:
+                backend = "kodi"
+            elif "chromium" in haystack or "google-chrome" in haystack:
+                backend = "chromium"
+            elif "firefox" in haystack:
+                backend = "firefox"
+            else:
+                backend = "mpris"
+
+        payload = json.dumps(
+            {
+                "action": action,
+                "app_class": app_class,
+                "backend": backend,
+                "match": str(cfg.get("media_match") or cfg.get("name") or app_class),
+            },
+            ensure_ascii=True,
+            separators=(",", ":")
+        )
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.sendto(
+                payload.encode("utf-8"),
+                REMOTE_CONTROL_SOCKET
+            )
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def resume_activated_media(self, app_class):
+        self.notify_remote_media("resume", app_class)
+        return False
+
     def launch_or_activate(self, app_class, command=None):
         """Activate an existing app or start it once on its persistent labwc workspace."""
         if not app_class:
@@ -2777,6 +3075,7 @@ class ShieldLauncher(Gtk.Window):
                     e["title"] = active.get("title") or e.get("name")
                     self.save_recent_tasks()
                     self.learn_app_id(app_class, aid)
+                    GLib.timeout_add(180, self.resume_activated_media, app_class)
                     return True
             except Exception:
                 pass
@@ -3319,15 +3618,70 @@ class ShieldLauncher(Gtk.Window):
 # replaces the main launcher presentation and its two carousels.
 # ============================================================================
 
-NEON_LEFT = 44
-NEON_APP_TOP = 234
-NEON_SYSTEM_TOP = 389
-NEON_APP_WIDTH = 152
-NEON_APP_HEIGHT = 140
-NEON_SYSTEM_WIDTH = 120
-NEON_SYSTEM_HEIGHT = 72
+NEON_LEFT = 20
+NEON_APP_TOP = 286
+NEON_SYSTEM_TOP = 400
+# Original CRT-friendly rectangular app-card geometry:
+# 4 x 164 px + 3 x 8 px gaps = exactly 680 px between 20 px side margins.
+NEON_APP_WIDTH = 164
+NEON_APP_HEIGHT = 102
+NEON_SYSTEM_WIDTH = 129
+NEON_SYSTEM_HEIGHT = 76
 NEON_GAP = 8
 NEON_SYSTEM_VISIBLE = 5
+
+CRT_BACKGROUND_CANDIDATES = [
+    os.path.expanduser("~/.config/shield-launcher/shield-background-crt.png"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "shield-background-crt.png"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "shield-background-crt.png"),
+]
+
+
+class CrtShieldBackground(Gtk.DrawingArea):
+    """High-contrast CRT background from the approved Shield PI mock-up."""
+
+    def __init__(self):
+        super().__init__()
+        self._source = None
+        for candidate in CRT_BACKGROUND_CANDIDATES:
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                self._source = GdkPixbuf.Pixbuf.new_from_file(candidate)
+                break
+            except Exception:
+                pass
+        self._scaled = None
+        self._scaled_size = None
+        self.connect("draw", self.draw_background)
+
+    def draw_background(self, widget, cr):
+        width = max(1, self.get_allocated_width())
+        height = max(1, self.get_allocated_height())
+
+        if self._source is not None:
+            size = (width, height)
+            if self._scaled is None or self._scaled_size != size:
+                self._scaled = self._source.scale_simple(
+                    width,
+                    height,
+                    GdkPixbuf.InterpType.BILINEAR
+                )
+                self._scaled_size = size
+            if self._scaled is not None:
+                Gdk.cairo_set_source_pixbuf(cr, self._scaled, 0, 0)
+                cr.paint()
+                # Slight black veil: keeps text/cards readable while preserving
+                # the deliberately stronger mountain contrast for the CRT.
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.06)
+                cr.rectangle(0, 0, width, height)
+                cr.fill()
+                return False
+
+        # Asset missing: never expose the desktop; use a safe black fallback.
+        cr.set_source_rgb(0.0, 0.0, 0.0)
+        cr.paint()
+        return False
 
 
 class NeonShieldBackground(Gtk.DrawingArea):
@@ -3533,7 +3887,7 @@ class NeonButton(Gtk.Button):
     def do_draw(self, cr):
         w = self.get_allocated_width()
         h = self.get_allocated_height()
-        cut = 9 if self.kind == "app" else 7
+        cut = 0 if self.kind == "app" else 7
         focus = self.has_focus()
 
         # Glow / selection halo, kept inside the widget clip.
@@ -3794,10 +4148,15 @@ class ShieldLauncherNeon(ShieldLauncher):
         for original in APPS:
             item = dict(original)
             cls = item.get("class")
+            # Display FreeTube as YouTube, while preserving the technical
+            # FreeTube class/command used by the stable remote/task logic.
             if cls == "freetube":
-                item["special_icon"] = "freetube"
-            elif cls in ("vlc", "kodi", "nordvpn"):
-                item["special_icon"] = cls
+                item["name"] = "YouTube"
+                item["special_icon"] = "youtube"
+            else:
+                # VLC, Kodi and NordVPN use their installed/original icons
+                # inside the common Shield glass-card design.
+                item.pop("special_icon", None)
             builtins.append(item)
 
         plus_item = {
@@ -3835,7 +4194,7 @@ class ShieldLauncherNeon(ShieldLauncher):
         overlay = Gtk.Overlay()
         self.add(overlay)
 
-        background = NeonShieldBackground()
+        background = CrtShieldBackground()
         background.set_hexpand(True)
         background.set_vexpand(True)
         overlay.add(background)
@@ -3862,11 +4221,11 @@ class ShieldLauncherNeon(ShieldLauncher):
         subtitle.set_halign(Gtk.Align.START)
         subtitle.set_markup('<span letter_spacing="3800">MEDIA LAUNCHER</span>')
         brand.pack_start(subtitle, False, False, 0)
-        fixed.put(brand, 62, 79)
+        fixed.put(brand, 46, 52)
 
         # Time/date block.
         time_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        time_box.set_size_request(118, 38)
+        time_box.set_size_request(170, 76)
         self.clock = Gtk.Label()
         self.clock.set_name("neon-clock")
         self.clock.set_halign(Gtk.Align.END)
@@ -3875,7 +4234,7 @@ class ShieldLauncherNeon(ShieldLauncher):
         self.clock_date.set_halign(Gtk.Align.END)
         time_box.pack_start(self.clock, False, False, 0)
         time_box.pack_start(self.clock_date, False, False, 0)
-        fixed.put(time_box, 567, 79)
+        fixed.put(time_box, 525, 38)
 
         # App carousel: 4 visible.
         self.app_row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=NEON_GAP)
@@ -3893,40 +4252,45 @@ class ShieldLauncherNeon(ShieldLauncher):
 
     def create_app_content(self, item):
         if item.get("action") == "add_app":
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.set_halign(Gtk.Align.CENTER)
             box.set_valign(Gtk.Align.CENTER)
+
             plus = Gtk.Label(label="+")
             plus.set_name("neon-plus")
-            caption = Gtk.Label()
+            caption = Gtk.Label(label="App hinzufügen")
             caption.set_name("neon-app-text")
-            caption.set_markup('<span letter_spacing="1200">APP HINZUFÜGEN</span>')
+            caption.set_line_wrap(True)
+            caption.set_justify(Gtk.Justification.CENTER)
+
             box.pack_start(plus, False, False, 0)
             box.pack_start(caption, False, False, 0)
             return box
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        box.set_halign(Gtk.Align.CENTER)
-        box.set_valign(Gtk.Align.CENTER)
+        # Rectangular CRT tile: icon left, full application name right.
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.set_halign(Gtk.Align.CENTER)
+        content.set_valign(Gtk.Align.CENTER)
 
-        mark = item.get("special_icon")
-        if mark in ("vlc", "freetube", "kodi", "nordvpn"):
-            icon = NeonAppMark(mark)
+        if item.get("class") == "freetube" or item.get("special_icon") == "youtube":
+            icon = YouTubeLogo()
         else:
             icon = self.load_app_icon(item)
 
         if icon:
-            box.pack_start(icon, False, False, 0)
+            content.pack_start(icon, False, False, 0)
 
-        name = Gtk.Label()
+        name = Gtk.Label(label=str(item.get("name") or ""))
         name.set_name("neon-app-text")
         name.set_halign(Gtk.Align.CENTER)
-        name.set_ellipsize(3)
-        name.set_max_width_chars(14)
-        label = xml_escape(str(item.get("name") or ""))
-        name.set_markup('<span letter_spacing="2200">%s</span>' % label)
-        box.pack_start(name, False, False, 0)
-        return box
+        name.set_valign(Gtk.Align.CENTER)
+        name.set_justify(Gtk.Justification.CENTER)
+        name.set_line_wrap(True)
+        name.set_max_width_chars(12)
+        # Deliberately no ellipsize: long custom app names wrap instead of
+        # becoming "KO..." / "VL..." on the CRT.
+        content.pack_start(name, False, False, 0)
+        return content
 
     def render_app_carousel(self):
         if self.app_row_box is None:
@@ -3960,18 +4324,19 @@ class ShieldLauncherNeon(ShieldLauncher):
         self.app_row_box.show_all()
 
     def create_system_content(self, item):
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         content.set_halign(Gtk.Align.CENTER)
         content.set_valign(Gtk.Align.CENTER)
 
         icon = NeonSystemSymbol(item.get("special_icon") or "info")
         content.pack_start(icon, False, False, 0)
 
-        label = Gtk.Label()
+        label = Gtk.Label(label=str(item.get("name") or ""))
         label.set_name("neon-system-text")
         label.set_halign(Gtk.Align.CENTER)
-        text = xml_escape(str(item.get("name") or ""))
-        label.set_markup('<span letter_spacing="1200">%s</span>' % text)
+        label.set_justify(Gtk.Justification.CENTER)
+        label.set_line_wrap(True)
+        label.set_max_width_chars(16)
         content.pack_start(label, False, False, 0)
         return content
 
@@ -4015,24 +4380,28 @@ class ShieldLauncherNeon(ShieldLauncher):
         super().load_css()
         css = b"""
         #brand-title {
-            color: #d8ddda;
-            font-size: 16px;
-            font-weight: 400;
+            color: #f3f5f2;
+            font-size: 20px;
+            font-weight: 500;
+            text-shadow: 0 1px rgba(0,0,0,0.95);
         }
         #brand-subtitle {
-            color: rgba(190, 199, 191, 0.55);
-            font-size: 6px;
-            font-weight: 400;
+            color: rgba(228, 234, 228, 0.78);
+            font-size: 8px;
+            font-weight: 500;
+            text-shadow: 0 1px rgba(0,0,0,0.95);
         }
         #neon-clock {
-            color: rgba(215, 220, 216, 0.72);
-            font-size: 14px;
-            font-weight: 400;
+            color: #f5f7f4;
+            font-size: 28px;
+            font-weight: 600;
+            text-shadow: 0 2px rgba(0,0,0,0.95);
         }
         #neon-date {
-            color: rgba(185, 195, 186, 0.56);
-            font-size: 6px;
-            font-weight: 400;
+            color: rgba(238, 244, 237, 0.92);
+            font-size: 12px;
+            font-weight: 500;
+            text-shadow: 0 1px rgba(0,0,0,0.95);
         }
         #neon-app-button, #neon-system-button {
             background: transparent;
@@ -4052,14 +4421,16 @@ class ShieldLauncherNeon(ShieldLauncher):
             outline: none;
         }
         #neon-app-text {
-            color: rgba(242, 245, 241, 0.92);
-            font-size: 12px;
-            font-weight: 400;
+            color: #f7f9f6;
+            font-size: 15px;
+            font-weight: 700;
+            text-shadow: 0 1px rgba(0,0,0,0.95);
         }
         #neon-system-text {
-            color: rgba(236, 241, 235, 0.92);
-            font-size: 8px;
-            font-weight: 400;
+            color: #f3f6f2;
+            font-size: 10px;
+            font-weight: 700;
+            text-shadow: 0 1px rgba(0,0,0,0.95);
         }
         #neon-plus {
             color: #9cff00;
@@ -4075,14 +4446,37 @@ class ShieldLauncherNeon(ShieldLauncher):
             color: #eef2ed;
             font-weight: 500;
         }
-        #task-card, #picker-item, #remove-choice {
+        #picker-item, #remove-choice {
             background: rgba(5, 11, 7, 0.98);
             border-color: rgba(126, 205, 35, 0.46);
         }
-        #task-card:focus, #picker-item:focus, #remove-choice:focus {
+        #picker-item:focus, #remove-choice:focus {
             background: rgba(12, 26, 12, 0.98);
             border-color: #9cff00;
             box-shadow: 0 0 9px rgba(140, 255, 0, 0.72);
+        }
+        #task-card, #task-card:focus {
+            background: transparent;
+            background-image: none;
+            border: none;
+            border-radius: 0;
+            box-shadow: none;
+            padding: 0;
+            outline: none;
+        }
+        #task-preview {
+            background: #000000;
+            border-color: rgba(210, 225, 210, 0.42);
+        }
+        #task-preview-selected {
+            background: #000000;
+            border-color: #9cff00;
+            box-shadow: 0 0 8px rgba(140, 255, 0, 0.60);
+        }
+        #task-preview-delete {
+            background: #000000;
+            border-color: #f2f2f2;
+            box-shadow: none;
         }
         #task-active, #plus-symbol {
             color: #9cff00;
@@ -4116,7 +4510,7 @@ class ShieldLauncherNeon(ShieldLauncher):
                 months[now.month - 1],
                 now.year,
             )
-            self.clock_date.set_markup('<span letter_spacing="1700">%s</span>' % text)
+            self.clock_date.set_markup('<span letter_spacing="650">%s</span>' % text)
         return True
 
     def focus_current(self):
@@ -4219,9 +4613,11 @@ class ShieldLauncherNeon(ShieldLauncher):
                 self.move_vertical(-1)
                 self.focus_current()
             elif key in ("Return", "KP_Enter"):
-                local = self.system_index - self.system_view_start
-                if 0 <= local < len(self.rows[1]):
-                    self.rows[1][local].clicked()
+                # Trigger the selected model item directly.  The carousel is
+                # rebuilt while navigating, so relying on a transient button
+                # instance can lose OK on the right-most system cards.
+                if 0 <= self.system_index < len(items):
+                    self.activate_item(None, items[self.system_index])
             elif key in ("Escape", "BackSpace"):
                 self.show_launcher()
             return True
@@ -4588,5 +4984,248 @@ class ShieldLauncherNeon(ShieldLauncher):
         return ShieldLauncher._release_osk_remote_device(self)
 
 
-launcher = ShieldLauncherNeon()
+
+class ShieldLauncherExternalRemote(ShieldLauncherNeon):
+    """Launcher variant controlled by the dedicated shield-remote daemon.
+
+    The launcher no longer opens/grabs the input-remapper virtual keyboard.
+    SIGUSR1 = show launcher, SIGUSR2 = show task manager, SIGHUP = FreeTube.
+    """
+
+    def __init__(self):
+        super().__init__()
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT,
+            signal.SIGUSR2,
+            self.on_external_taskmanager_signal
+        )
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT,
+            signal.SIGHUP,
+            self.on_external_freetube_signal
+        )
+        self._control_sock = None
+        self._control_watch_id = 0
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", DEFAULT_XDG_RUNTIME_DIR)
+        self._control_sock_path = os.path.join(runtime_dir, "shield-launcher-control.sock")
+        self._osk_marker_path = os.path.join(runtime_dir, "shield-osk-visible")
+        self._setup_external_control_socket()
+        self.connect("destroy", self._cleanup_external_control)
+
+    def _ensure_osk_remote_device(self):
+        # The physical remote is owned exclusively by shield-remote.py.
+        # Never reconnect to input-remapper from the launcher.
+        return False
+
+    def _sync_remote_layer(self):
+        return False
+
+    def _set_remote_grab(self, enabled):
+        self.remote_device_grabbed = False
+        return False
+
+
+    # --------------------------------------------------------------
+    # External remote / OSK control socket
+    # --------------------------------------------------------------
+    def _setup_external_control_socket(self):
+        try:
+            if os.path.exists(self._control_sock_path):
+                os.unlink(self._control_sock_path)
+        except Exception:
+            pass
+
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.bind(self._control_sock_path)
+            sock.setblocking(False)
+            self._control_sock = sock
+            self._control_watch_id = GLib.io_add_watch(
+                sock.fileno(),
+                GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+                self._on_external_control_fd
+            )
+        except Exception as e:
+            self._control_sock = None
+            self._control_watch_id = 0
+            print("Shield-Control-Socket Fehler:", e, flush=True)
+
+    def _cleanup_external_control(self, *args):
+        self._set_osk_marker(False)
+        if self._control_watch_id:
+            try:
+                GLib.source_remove(self._control_watch_id)
+            except Exception:
+                pass
+            self._control_watch_id = 0
+        if self._control_sock is not None:
+            try:
+                self._control_sock.close()
+            except Exception:
+                pass
+            self._control_sock = None
+        try:
+            if os.path.exists(self._control_sock_path):
+                os.unlink(self._control_sock_path)
+        except Exception:
+            pass
+
+    def _on_external_control_fd(self, source, condition):
+        if condition & (GLib.IO_HUP | GLib.IO_ERR):
+            return True
+        sock = self._control_sock
+        if sock is None:
+            return False
+        while True:
+            try:
+                data = sock.recv(256)
+            except BlockingIOError:
+                break
+            except Exception:
+                break
+            if not data:
+                break
+            command = data.decode("utf-8", errors="ignore").strip()
+            self._handle_external_control(command)
+        return True
+
+    def _handle_external_control(self, command):
+        if command == "osk_show":
+            self.show_osk()
+            return
+        if command == "osk_close":
+            self.hide_osk()
+            return
+        if not self.osk_visible:
+            return
+        if command == "osk_up":
+            self._osk_move(-1, 0)
+        elif command == "osk_down":
+            self._osk_move(1, 0)
+        elif command == "osk_left":
+            self._osk_move(0, -1)
+        elif command == "osk_right":
+            self._osk_move(0, 1)
+        elif command == "osk_select":
+            self._osk_activate_selected()
+
+    def _set_osk_marker(self, visible):
+        try:
+            if visible:
+                with open(self._osk_marker_path, "w", encoding="utf-8") as f:
+                    f.write("1\n")
+            elif os.path.exists(self._osk_marker_path):
+                os.unlink(self._osk_marker_path)
+        except Exception:
+            pass
+
+    def show_osk(self):
+        """Show the universal OSK while shield-remote owns the physical remote."""
+        if self.osk_visible:
+            self._set_osk_marker(True)
+            return False
+        if GtkLayerShell is None:
+            print("Shield Tastatur: GtkLayerShell fehlt", flush=True)
+            return False
+        if not os.path.isfile("/usr/bin/wtype"):
+            print("Shield Tastatur: /usr/bin/wtype fehlt", flush=True)
+            return False
+        if not self._ensure_osk_window():
+            print("Shield Tastatur: Layer-Shell Fenster konnte nicht erstellt werden", flush=True)
+            return False
+
+        self.osk_visible = True
+        self.osk_row = 1
+        self.osk_col = 0
+        self._render_osk()
+        self._set_osk_marker(True)
+        try:
+            self.osk_window.show_all()
+        except Exception:
+            self.osk_visible = False
+            self._set_osk_marker(False)
+        return False
+
+    def hide_osk(self):
+        self.osk_visible = False
+        if self.osk_window is not None:
+            try:
+                self.osk_window.hide()
+            except Exception:
+                pass
+        self._set_osk_marker(False)
+
+    def on_taskmanager_signal(self):
+        """SIGUSR1 from shield-remote: always return to the launcher."""
+        self.notify_remote_media("pause", self.foreground_task_class)
+        if self.task_window is not None:
+            try:
+                self.task_window.destroy()
+            except Exception:
+                pass
+
+        if not self.launcher_foreground:
+            try:
+                self.capture_foreground_thumbnail()
+            except Exception:
+                pass
+
+        self.last_home_press = 0.0
+        self.show_launcher()
+        return True
+
+    def on_external_taskmanager_signal(self):
+        """SIGUSR2 from shield-remote: open the task manager directly."""
+        self.notify_remote_media("pause", self.foreground_task_class)
+        if self.task_window is not None:
+            try:
+                self.task_window.present()
+                self.focus_task()
+                return True
+            except Exception:
+                pass
+
+        if not self.launcher_foreground:
+            try:
+                self.capture_foreground_thumbnail()
+            except Exception:
+                pass
+
+        self.show_launcher()
+        GLib.idle_add(self.show_task_manager)
+        return True
+
+    def on_external_freetube_signal(self):
+        """SIGHUP from the Netflix button: launch/activate FreeTube."""
+        if self.task_window is not None:
+            try:
+                self.task_window.destroy()
+            except Exception:
+                pass
+
+        cfg = self.app_config("freetube")
+        if not cfg or not cfg.get("command"):
+            self.show_launcher()
+            self.message("FreeTube ist nicht eingerichtet.")
+            return True
+
+        try:
+            self.launcher_foreground = False
+            self._hide_desktop_chrome()
+            self._show_black_workspace()
+            self.iconify()
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+            ok = self.launch_or_activate("freetube", command=cfg.get("command"))
+            if not ok:
+                self.show_launcher()
+                self.message("FreeTube konnte nicht gestartet werden.")
+        except Exception as e:
+            self.show_launcher()
+            self.message("FreeTube-Startfehler:\n" + str(e))
+        return True
+
+
+launcher = ShieldLauncherExternalRemote()
 Gtk.main()

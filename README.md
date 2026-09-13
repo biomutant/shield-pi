@@ -8,7 +8,10 @@ The project combines a custom GTK3 launcher, application-aware NVIDIA Shield Rem
 
 ## Current milestone
 
-**Shield NordVPN v10.24** is the current confirmed stable basis. New NordVPN development starts logically with **v10.25**.
+**Stable 2026-09-12** is the current confirmed complete-system basis. It keeps
+**Shield NordVPN v10.24** and adds the verified launcher/task-manager,
+application-aware media pause/resume, Shield VLC/NAS playback and the
+projectM/MilkDrop music-player integration.
 
 The repository is still experimental, but installer, launcher and service paths are user-independent. Runtime files are resolved from the installing user's home directory; `SHIELD_HOME` can override that location where supported. Every installation requires its own locally authenticated NordVPN CLI session—no account credentials are included in this repository.
 
@@ -28,6 +31,8 @@ The repository is still experimental, but installer, launcher and service paths 
 - `remote/` — direct evdev Shield Remote daemon with profiles for Kodi, Firefox/Chromium, FreeTube and VLC
 - `vlc/` — Shield VLC frontend / DVD shuttle controls
 - `freetube/` — FreeTube navigation integration
+- `system/` — sanitized CRT, labwc, projectM and service templates
+- `assets/visual-references/` — approved, metadata-cleaned design references
 - `docs/` — architecture, project rules, current state and key mappings
 - `milestones/` — milestone policy and development notes
 
@@ -47,8 +52,11 @@ See [Launcher, application navigation and task manager](docs/LAUNCHER_NAVIGATION
 
 - One **Home** press returns to the launcher.
 - A rapid double **Home** press opens **Recent applications**.
-- Up to four recent-task cards are visible in a horizontal carousel.
-- Cards show a thumbnail when available and indicate whether the application is active.
+- Three enlarged recent-task cards are visible in a horizontal carousel.
+- Each card keeps its own persistent application screenshot until the task is
+  reopened or explicitly discarded.
+- Entering the launcher/task manager pauses active multimedia without ending
+  the application; reopening the task resumes at the same position.
 - **OK** opens or activates a task.
 - **Down**, followed by **OK**, closes the selected task and removes it from the recent list.
 - **Back** or **Home** returns to the launcher.
@@ -80,7 +88,10 @@ Real Raspberry Pi/CRT tests, screenshots, logs and current source code are treat
 
 ## Development status
 
-The current development focus is the NordVPN multi-city/multi-server **SHIELD SERVER GRID**. Country/city/server cards use the established **164×102 px** geometry with four visible cards in a horizontal carousel.
+The launcher, task manager, remote control and Shield VLC/music-player state
+documented in [Stable 2026-09-12](docs/STABLE_2026-09-12.md) is the confirmed
+baseline for further work. Country/city/server cards in the NordVPN UI retain
+the established **164×102 px** geometry.
 
 For deeper project context see:
 
@@ -90,6 +101,8 @@ For deeper project context see:
 - [Remote keycodes](docs/REMOTE_KEYCODES.md)
 - [Project master definition](docs/PROJECT_MASTER_PROMPT.md)
 - [Version history](docs/VERSION_HISTORY.md)
+- [Stable 2026-09-12](docs/STABLE_2026-09-12.md)
+- [Stable installation notes](docs/INSTALLATION_STABLE_2026-09-12.md)
 
 ## Contributing
 

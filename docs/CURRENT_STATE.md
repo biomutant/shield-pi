@@ -1,5 +1,15 @@
 # CURRENT STATE — SHIELD PI
 
+## Canonical complete-system milestone
+
+**Stable 2026-09-12** is the confirmed basis for launcher, task manager,
+remote daemon, Shield VLC/NAS playback and the projectM/MilkDrop music player.
+
+The task manager now displays three enlarged cards, stores one persistent
+screenshot per application, pauses multimedia on leaving a task and resumes it
+when the same task is activated again. Discarding a card remains the explicit
+operation that closes that task.
+
 ## Canonical NordVPN milestone
 
 **v10.24** is the current confirmed Shield NordVPN milestone and preferred stable basis.
@@ -23,7 +33,10 @@ The published launcher contains built-in entries for VLC, FreeTube, Kodi and Nor
 
 Managed applications receive persistent labwc workspaces. Selecting a running application activates its existing window rather than launching a duplicate.
 
-The task manager tracks recent Shield Pi applications, displays up to four cards at once, uses screenshots when available and supports activating or closing a task. One Home press returns to the launcher; a rapid double Home opens the task manager.
+The task manager tracks recent Shield Pi applications, displays three enlarged
+cards at once, preserves application-specific screenshots and supports
+activating or explicitly discarding a task. One Home press returns to the
+launcher; a rapid double Home opens the task manager.
 
 Remote behavior is selected from the active application:
 
@@ -55,13 +68,20 @@ Unless explicitly targeted, preserve:
 - `nordvpn/` — current v10.24 NordVPN source and project-owned UI assets
 - `launcher/` — current Shield Launcher, app-management and task-manager snapshot
 - `remote/` — current Shield Remote daemon, profiles and service material
-- `vlc/` — Shield VLC v20 DVD/shuttle snapshot
+- `vlc/` — Shield VLC with NAS/video playback, remote controls and the 4:3
+  projectM/MilkDrop music-player design
 - `freetube/` — FreeTube navigation integration
+- `system/` — sanitized CRT, labwc, projectM and service templates
 
 ## Approved visual references
 
-Project-approved visual references and CRT photographs remain in the private development archive because they may contain environmental details or runtime network information. The public repository contains only the distributable application assets.
+The public repository contains only the approved visual references that passed
+the privacy review and had image metadata removed. Personal CRT/home photos and
+runtime screenshots remain in the private development archive.
 
 ## Public collaboration note
 
-The public repository intentionally excludes personal CRT/home photos, duplicate release ZIP archives and unverified third-party flag assets from the current tree. See `PUBLIC_RELEASE_CHECKLIST.md` and the repository-level `THIRD_PARTY_NOTICES.md`.
+The public repository intentionally excludes personal CRT/home photos,
+duplicate release ZIP archives, credentials, runtime state and unverified
+third-party flag assets. See `PUBLIC_RELEASE_CHECKLIST.md` and the
+repository-level `THIRD_PARTY_NOTICES.md`.
